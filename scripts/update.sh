@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # ComfyPod updater (also installed as `comfypod-update`). Explicit updates
 # only — normal boots never touch working versions unless AUTO_UPDATE=true.
+# A snapshot is saved first, so a broken update is one restore away:
+#   comfypod-snapshot restore pre-update-<timestamp>
 #
 #   comfypod-update                update repo + ComfyUI + all custom nodes, restart
 #   comfypod-update --comfyui-only used internally by start.sh for AUTO_UPDATE
@@ -21,17 +23,16 @@ update_comfyui() {
     fi
     git -C "$COMFY_DIR" checkout --quiet "$ref" || { warn "checkout $ref failed"; return 1; }
     log "ComfyUI now at $(git -C "$COMFY_DIR" describe --tags --always)"
-    local req_hash
-    req_hash="$(md5sum "$COMFY_DIR/requirements.txt" | cut -d' ' -f1)"
-    if ! marker_ok "comfy-reqs-$req_hash"; then
-        "$PIP" install -q -r "$COMFY_DIR/requirements.txt" && marker_set "comfy-reqs-$req_hash"
-    fi
+    pkg_install -r "$COMFY_DIR/requirements.txt" || warn "requirements install failed"
 }
 
 if [ "${1:-}" = "--comfyui-only" ]; then
     update_comfyui
     exit $?
 fi
+
+"$SCRIPT_DIR/snapshot.sh" save "pre-update-$(date +%Y%m%d-%H%M%S)" \
+    || warn "snapshot failed — continuing without a rollback point"
 
 log "updating ComfyPod repo"
 git -C "$REPO_DIR" pull --ff-only --quiet || warn "repo update failed"
@@ -44,9 +45,8 @@ for dir in "$COMFY_DIR"/custom_nodes/*/; do
     name="$(basename "$dir")"
     if git -C "$dir" pull --ff-only --quiet 2>/dev/null; then
         log "updated $name"
-        marker_rm "node-deps-$name"   # re-run its requirements on restart
     else
-        warn "could not update $name (local changes?)"
+        warn "could not update $name (pinned or local changes)"
     fi
 done
 

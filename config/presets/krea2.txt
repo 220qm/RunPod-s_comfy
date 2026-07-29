@@ -1,6 +1,8 @@
 # Krea 2 Turbo (text-to-image) — fp8_scaled, ideal for 24–32 GB GPUs.
-# 8 steps, cfg 1.0. Workflow: ComfyUI menu -> Templates -> "Krea 2".
+# ~8 steps, CFG 1.0 (distilled). Workflow: ComfyUI menu -> Templates -> "Krea 2".
+# License: Krea 2 Community License (free commercial use < 50 seats).
+# Format: folder|filename|url[|sha256]
 # size: ~18 GB
 diffusion_models|krea2_turbo_fp8_scaled.safetensors|https://huggingface.co/Comfy-Org/Krea-2/resolve/main/diffusion_models/krea2_turbo_fp8_scaled.safetensors
 text_encoders|qwen3vl_4b_fp8_scaled.safetensors|https://huggingface.co/Comfy-Org/Krea-2/resolve/main/text_encoders/qwen3vl_4b_fp8_scaled.safetensors
-vae|qwen_image_vae.safetensors|https://huggingface.co/Comfy-Org/Krea-2/resolve/main/vae/qwen_image_vae.safetensors
+vae|qwen_image_vae.safetensors|https://huggingface.co/Comfy-Org/Krea-2/resolve/main/vae/qwen_image_vae.safetensors|a70580f0213e67967ee9c95f05bb400e8fb08307e017a924bf3441223e023d1f

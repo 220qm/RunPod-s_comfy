@@ -1,34 +1,46 @@
-# Custom nodes installed on first boot (one git URL per line).
-# Kept deliberately lean and battle-tested; add your own here or via the
-# EXTRA_NODES env var (comma-separated git URLs). ComfyUI-Manager can install
-# anything else from the UI later.
+# Custom nodes installed on first boot.
+# Format: <git-url>[@commit-or-tag]  — pin anything you need reproducible.
+# Kept deliberately small: every node is a potential import error at boot.
+# Add more here, via the EXTRA_NODES env var (comma-separated), or from the
+# ComfyUI-Manager UI. The exact installed commits are recorded on every boot
+# in /workspace/.comfypod/nodes.lock and restorable with `comfypod-snapshot`.
 
-# Node/model manager UI — install nodes & models from inside ComfyUI
+# Node/model management UI + the snapshot/CLI machinery
 https://github.com/Comfy-Org/ComfyUI-Manager
 
-# Video: encode/decode/combine (required by nearly every video workflow)
-https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite
+# Authentication for the UI and the HTTP API (cookie/session based — survives
+# the WebSocket handshake, which HTTP basic auth does not reliably do)
+https://github.com/liusida/ComfyUI-Login
 
-# Kijai's utility nodes (torch compile, image resize, mask ops — Wan staples)
+# In-UI model browser/downloader with HuggingFace + Civitai token support
+https://github.com/hayden-fr/ComfyUI-Model-Manager
+
+# Kijai's utility nodes — includes "Patch Sage Attention" (the safe,
+# per-workflow way to use SageAttention on Wan/Qwen models)
 https://github.com/kijai/ComfyUI-KJNodes
 
-# Advanced Wan video wrapper (context windows, long videos, extra samplers)
-https://github.com/kijai/ComfyUI-WanVideoWrapper
+# Video encode/decode/combine — required by nearly every video workflow
+https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite
 
-# GGUF quantized model loading (run bigger models on smaller VRAM)
-https://github.com/city96/ComfyUI-GGUF
+# Live GPU/VRAM/disk monitor in the toolbar — you're paying by the hour
+https://github.com/crystian/ComfyUI-Crystools
 
 # Quality-of-life: reroutes, groups, fast muters, image comparer
 https://github.com/rgthree/rgthree-comfy
 
-# GPU/CPU/RAM monitor in the ComfyUI toolbar
-https://github.com/crystian/ComfyUI-Crystools
-
 # Autocomplete, snap-to-grid, workflow image metadata
 https://github.com/pythongosssss/ComfyUI-Custom-Scripts
 
-# Compact essential utilities (resize, sharpen, simple math)
-https://github.com/cubiq/ComfyUI_essentials
+# GGUF quantized model loading (fallback tier if a 24 GB card OOMs)
+https://github.com/city96/ComfyUI-GGUF
 
+# --- Optional (uncomment or add via EXTRA_NODES) ---------------------------
 # RIFE frame interpolation — smooth/extend generated videos
-https://github.com/Fannovel16/ComfyUI-Frame-Interpolation
+#https://github.com/Fannovel16/ComfyUI-Frame-Interpolation
+# Kijai's Wan wrapper — powerful, but its workflows are a parallel universe
+# to the native Wan nodes; pull it in only when a workflow needs it
+#https://github.com/kijai/ComfyUI-WanVideoWrapper
+# Compact utilities (resize, sharpen, simple math)
+#https://github.com/cubiq/ComfyUI_essentials
+# Depth/pose/edge preprocessors for ControlNet workflows
+#https://github.com/Fannovel16/comfyui_controlnet_aux

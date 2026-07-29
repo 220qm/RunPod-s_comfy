@@ -6,7 +6,8 @@ SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 source "$SCRIPT_DIR/lib.sh"
 set -uo pipefail
 
-for svc in comfyui caddy filebrowser jupyter; do
+for svc in comfyui filebrowser jupyter idle-guard; do
     stop_service "$svc"
 done
+pkill -f "scripts/auth-guard.sh" 2>/dev/null || true
 log "all services stopped (restart with: bash $REPO_DIR/scripts/start.sh)"
