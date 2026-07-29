@@ -23,5 +23,6 @@ COPY . /opt/comfypod
 RUN chmod +x /opt/comfypod/bootstrap.sh /opt/comfypod/scripts/*.sh
 
 # ComfyPod boots in the background; the base image's /start.sh keeps SSH and
-# the RunPod plumbing alive as PID 1.
-CMD ["bash", "-c", "(/opt/comfypod/bootstrap.sh >> /workspace/comfypod-boot.log 2>&1 &) ; exec /start.sh"]
+# the RunPod plumbing alive as PID 1. Output is teed so boot progress and
+# failures are visible in the pod's container log, not just in a file.
+CMD ["bash", "-c", "(/opt/comfypod/bootstrap.sh 2>&1 | tee -a /workspace/comfypod-boot.log &) ; exec /start.sh"]

@@ -139,6 +139,7 @@ speed for import speed the other way.
 
 | Symptom | Fix |
 |---|---|
+| **Pod boots but only the base image's Jupyter is there** (no ComfyUI on 8188, no FileBrowser on 8080) | The bootstrap never ran. Look for `[comfypod]` lines in the container log; if there are none, the template's start command is missing or its branch/token is wrong. Fix it by hand from any pod terminal: `B=main; curl -fsSL "https://raw.githubusercontent.com/220qm/RunPod-s_comfy/$B/bootstrap.sh" -o /tmp/bs.sh && COMFYPOD_BRANCH=$B bash /tmp/bs.sh` (use the feature branch until the PR is merged; add `-H "Authorization: Bearer $GITHUB_TOKEN"` if the repo is private) |
 | Anything feels off | `comfypod-doctor` first — it checks GPU, torch, auth, disks, models |
 | "Which URL/password?" | Pod logs → connection block, or `cat /workspace/.comfypod/credentials.txt` |
 | Locked out of ComfyUI | `comfypod-secrets set-password`, or delete `/workspace/ComfyUI/login/PASSWORD` and set a new one on next visit |

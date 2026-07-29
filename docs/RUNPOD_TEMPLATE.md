@@ -60,18 +60,23 @@ RunPod Console → **Templates** → *New Template*:
 **Container Start Command** (public repo):
 
 ```bash
-bash -c '(curl -fsSL https://raw.githubusercontent.com/220qm/RunPod-s_comfy/main/bootstrap.sh | bash) >> /workspace/comfypod-boot.log 2>&1 & exec /start.sh'
+bash -c 'B="${COMFYPOD_BRANCH:-main}"; (echo "[comfypod] fetching bootstrap from branch $B"; curl -fsSL "https://raw.githubusercontent.com/220qm/RunPod-s_comfy/$B/bootstrap.sh" -o /tmp/comfypod-bootstrap.sh && bash /tmp/comfypod-bootstrap.sh || echo "[comfypod] !!! BOOTSTRAP FAILED to download or run. Check: branch $B exists on GitHub; repo is public (private needs GITHUB_TOKEN); network reachable.") 2>&1 | tee -a /workspace/comfypod-boot.log & exec /start.sh'
 ```
 
-> **Using a branch other than `main`?** Swap the branch in the raw URL *and*
-> add a `COMFYPOD_BRANCH` env var with the branch name so the on-volume clone
-> tracks the same branch.
+Progress and errors appear **in the pod's container log** (and are also saved
+to `/workspace/comfypod-boot.log`). If you see no `[comfypod]` lines at all,
+the start command itself was never applied — re-check the template field.
+
+> **Branch:** the command uses the `COMFYPOD_BRANCH` env var (default `main`).
+> Until the ComfyPod PR is merged into `main`, set
+> `COMFYPOD_BRANCH=claude/comfyui-runpod-setup-xpr6x1` in the template's
+> environment variables — otherwise the fetch 404s and nothing installs.
 
 If this repo is **private**: add a `GITHUB_TOKEN` secret (fine-grained PAT,
 read-only on this repo) and use:
 
 ```bash
-bash -c '(curl -fsSL -H "Authorization: Bearer $GITHUB_TOKEN" https://raw.githubusercontent.com/220qm/RunPod-s_comfy/main/bootstrap.sh | bash) >> /workspace/comfypod-boot.log 2>&1 & exec /start.sh'
+bash -c 'B="${COMFYPOD_BRANCH:-main}"; (echo "[comfypod] fetching bootstrap from branch $B"; curl -fsSL -H "Authorization: Bearer $GITHUB_TOKEN" "https://raw.githubusercontent.com/220qm/RunPod-s_comfy/$B/bootstrap.sh" -o /tmp/comfypod-bootstrap.sh && bash /tmp/comfypod-bootstrap.sh || echo "[comfypod] !!! BOOTSTRAP FAILED — is GITHUB_TOKEN set and valid for this repo?") 2>&1 | tee -a /workspace/comfypod-boot.log & exec /start.sh'
 ```
 
 **Environment variables** for the template:
@@ -82,6 +87,7 @@ bash -c '(curl -fsSL -H "Authorization: Bearer $GITHUB_TOKEN" https://raw.github
 | `HF_TOKEN` | `{{ RUNPOD_SECRET_HF_TOKEN }}` |
 | `CIVITAI_TOKEN` | `{{ RUNPOD_SECRET_CIVITAI_TOKEN }}` |
 | `GITHUB_TOKEN` | `{{ RUNPOD_SECRET_GITHUB_TOKEN }}` (private repo only) |
+| `COMFYPOD_BRANCH` | `claude/comfyui-runpod-setup-xpr6x1` (until the PR is merged; omit once it's on `main`) |
 | `DOWNLOAD_PRESETS` | `krea2,wan22-5b,wan22-t2v,wan22-i2v,upscale` (optional, this is the default) |
 
 Any variable from `.env.example` can be added the same way (e.g.
