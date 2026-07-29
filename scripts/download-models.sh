@@ -4,37 +4,37 @@
 #   comfy-dl preset <names>          download preset(s), comma-separated or "all"
 #   comfy-dl url <url> [folder] [filename]
 #   comfy-dl civitai <version-id> [folder]
+#   comfy-dl verify [presets]        check present files against manifest hashes
 #   comfy-dl list                    show presets and their contents
 #
-# Auth is injected automatically: HF_TOKEN as a Bearer header for
-# huggingface.co, CIVITAI_TOKEN as ?token= for civitai.* URLs. Downloads are
-# resumable (aria2c -c) and skipped when the file already exists.
+# Auth (HF_TOKEN for huggingface.co, CIVITAI_TOKEN for civitai.*) is sent as
+# an Authorization: Bearer header written to a 0600 temp file — tokens never
+# appear in URLs, process listings, or logs. Downloads are resumable and
+# skipped when the file already exists.
+#
+# Manifest line format: folder|filename|url[|sha256]
 
 export SCRIPT_NAME=download
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib.sh"
 set -uo pipefail
+ensure_dirs
 
 PRESET_DIR="$REPO_DIR/config/presets"
 [ -d "$PRESET_DIR" ] || PRESET_DIR="$SCRIPT_DIR/../config/presets"
 FAILED=0
 
-with_civitai_token() {
-    local url="$1"
-    if [ -n "$CIVITAI_TOKEN" ]; then
-        case "$url" in
-            *\?*) printf '%s&token=%s' "$url" "$CIVITAI_TOKEN" ;;
-            *)    printf '%s?token=%s' "$url" "$CIVITAI_TOKEN" ;;
-        esac
-    else
-        printf '%s' "$url"
-    fi
+token_for_url() {
+    case "$1" in
+        *huggingface.co*) printf '%s' "$HF_TOKEN" ;;
+        *civitai.*)       printf '%s' "$CIVITAI_TOKEN" ;;
+    esac
 }
 
-# dl_file <folder-relative-to-models> <filename> <url>
+# dl_file <folder-relative-to-models> <filename> <url> [sha256]
 dl_file() {
-    local folder="$1" filename="$2" url="$3"
+    local folder="$1" filename="$2" url="$3" sha="${4:-}"
     local dest_dir="$MODELS_DIR/$folder" dest="$MODELS_DIR/$folder/$filename"
     mkdir -p "$dest_dir"
 
@@ -43,41 +43,52 @@ dl_file() {
         return 0
     fi
 
-    local args=(-x16 -s16 -k1M -c --auto-file-renaming=false --allow-overwrite=true
-                --console-log-level=warn --summary-interval=30 --file-allocation=none
-                -d "$dest_dir" -o "$filename")
-    case "$url" in
-        *huggingface.co*)
-            [ -n "$HF_TOKEN" ] && args+=("--header=Authorization: Bearer $HF_TOKEN") ;;
-        *civitai.*)
-            url="$(with_civitai_token "$url")" ;;
-    esac
+    local token input
+    token="$(token_for_url "$url")"
+    input="$(umask 077 && mktemp "$TMP_DIR/dl.XXXXXX")"
+    {
+        printf '%s\n' "$url"
+        printf ' dir=%s\n' "$dest_dir"
+        printf ' out=%s\n' "$filename"
+        [ -n "$token" ] && printf ' header=Authorization: Bearer %s\n' "$token"
+        [ -n "$sha" ]   && printf ' checksum=sha-256=%s\n' "$sha"
+    } > "$input"
 
     log "downloading: $folder/$filename"
-    if aria2c "${args[@]}" "$url"; then
+    if aria2c -x16 -s16 -k1M -c --auto-file-renaming=false --allow-overwrite=true \
+              --console-log-level=warn --summary-interval=30 --file-allocation=none \
+              -i "$input"; then
+        rm -f "$input"
         log "done: $folder/$filename"
     else
-        warn "FAILED: $folder/$filename ($url)"
-        warn "  If this is a gated/private model, set HF_TOKEN / CIVITAI_TOKEN."
+        rm -f "$input"
+        warn "FAILED: $folder/$filename"
+        warn "  Gated/private model? Set the matching token: comfypod-secrets set-hf-token / set-civitai-token"
         FAILED=$((FAILED + 1))
         return 1
     fi
 }
 
 run_manifest() {
-    local file="$1" line folder filename url
+    local file="$1" line folder filename url sha
     while IFS= read -r line; do
         case "$line" in ''|'#'*) continue ;; esac
-        IFS='|' read -r folder filename url <<< "$line"
-        dl_file "$folder" "$filename" "$url" || true
+        IFS='|' read -r folder filename url sha <<< "$line"
+        dl_file "$folder" "$filename" "$url" "$sha" || true
     done < "$file"
 }
 
-cmd_preset() {
-    local names="$1" name file
-    if [ "$names" = "all" ]; then
-        names="$(cd "$PRESET_DIR" && ls -- *.txt | sed 's/\.txt$//' | paste -sd, -)"
+resolve_presets() {
+    if [ "$1" = "all" ]; then
+        (cd "$PRESET_DIR" && ls -- *.txt | sed 's/\.txt$//' | paste -sd, -)
+    else
+        printf '%s' "$1"
     fi
+}
+
+cmd_preset() {
+    local names name file
+    names="$(resolve_presets "$1")"
     for name in ${names//,/ }; do
         file="$PRESET_DIR/$name.txt"
         if [ ! -f "$file" ]; then
@@ -98,10 +109,16 @@ cmd_url() {
         # server-provided filename instead of aria2 (which cannot).
         case "$url" in
             *civitai.*/api/*)
-                url="$(with_civitai_token "$url")"
+                local hdr token
+                token="$(token_for_url "$url")"
+                hdr="$(umask 077 && mktemp "$TMP_DIR/hdr.XXXXXX")"
+                [ -n "$token" ] && printf 'Authorization: Bearer %s\n' "$token" > "$hdr"
                 mkdir -p "$MODELS_DIR/$folder"
                 log "downloading via curl into $folder/ (server-side filename)"
-                (cd "$MODELS_DIR/$folder" && curl -fJLO --retry 3 "$url") || { warn "download failed"; exit 1; }
+                (cd "$MODELS_DIR/$folder" && curl -fJLO --retry 3 -H @"$hdr" "$url")
+                local rc=$?
+                rm -f "$hdr"
+                [ "$rc" -ne 0 ] && { warn "download failed"; exit 1; }
                 return 0 ;;
         esac
     fi
@@ -111,6 +128,42 @@ cmd_url() {
 cmd_civitai() {
     local version_id="$1" folder="${2:-loras}"
     cmd_url "https://civitai.com/api/download/models/$version_id" "$folder"
+}
+
+cmd_verify() {
+    local names name file line folder filename url sha actual bad=0
+    names="$(resolve_presets "${1:-all}")"
+    for name in ${names//,/ }; do
+        file="$PRESET_DIR/$name.txt"
+        [ -f "$file" ] || continue
+        while IFS= read -r line; do
+            case "$line" in ''|'#'*) continue ;; esac
+            IFS='|' read -r folder filename url sha <<< "$line"
+            local dest="$MODELS_DIR/$folder/$filename"
+            if [ ! -s "$dest" ]; then
+                echo "MISSING     $folder/$filename"
+                continue
+            fi
+            if [ -f "$dest.aria2" ]; then
+                echo "INCOMPLETE  $folder/$filename (resume with: comfy-dl preset $name)"
+                bad=$((bad + 1))
+                continue
+            fi
+            if [ -n "$sha" ]; then
+                actual="$(sha256sum "$dest" | cut -d' ' -f1)"
+                if [ "$actual" = "$sha" ]; then
+                    echo "OK          $folder/$filename"
+                else
+                    echo "CORRUPT     $folder/$filename (delete it and re-run the preset)"
+                    bad=$((bad + 1))
+                fi
+            else
+                echo "PRESENT     $folder/$filename (no hash in manifest)"
+            fi
+        done < "$file"
+    done
+    [ "$bad" -gt 0 ] && exit 1
+    exit 0
 }
 
 cmd_list() {
@@ -126,8 +179,9 @@ case "${1:-}" in
     preset)  shift; cmd_preset "${1:?usage: comfy-dl preset <names|all>}" ;;
     url)     shift; cmd_url "${1:?usage: comfy-dl url <url> [folder] [filename]}" "${2:-}" "${3:-}" ;;
     civitai) shift; cmd_civitai "${1:?usage: comfy-dl civitai <version-id> [folder]}" "${2:-}" ;;
+    verify)  shift; cmd_verify "${1:-all}" ;;
     list)    cmd_list ;;
-    *)       sed -n '2,12p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 1 ;;
+    *)       sed -n '2,15p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 1 ;;
 esac
 
 if [ "$FAILED" -gt 0 ]; then
