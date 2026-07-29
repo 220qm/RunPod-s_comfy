@@ -67,6 +67,12 @@ export VENV_LOCATION="${VENV_LOCATION:-container}"
 export TORCH_SPEC="${TORCH_SPEC:-torch==2.8.0 torchvision==0.23.0 torchaudio==2.8.0}"
 export TORCH_INDEX="${TORCH_INDEX:-https://download.pytorch.org/whl/cu128}"
 
+# Set by the baked Docker image (ghcr.io/220qm/comfypod): torch, ComfyUI,
+# nodes and binaries are pre-installed, so the boot scripts skip every
+# download/build step. The baked venv is always at the container path.
+export COMFYPOD_BAKED="${COMFYPOD_BAKED:-0}"
+[ "$COMFYPOD_BAKED" = "1" ] && VENV_LOCATION=container
+
 if [ "$VENV_LOCATION" = "volume" ]; then
     export VENV_DIR="$STATE_DIR/venv"
 else
@@ -127,6 +133,14 @@ port_free() {
 uv_bin() {
     if [ -x "$BIN_DIR/uv" ]; then printf '%s' "$BIN_DIR/uv"
     else command -v uv 2>/dev/null || true
+    fi
+}
+
+# FileBrowser binary: baked into the image at /usr/local/bin, downloaded to
+# the volume's bin dir otherwise.
+fb_bin() {
+    if [ -x "$BIN_DIR/filebrowser" ]; then printf '%s' "$BIN_DIR/filebrowser"
+    else command -v filebrowser 2>/dev/null || true
     fi
 }
 
@@ -228,7 +242,7 @@ stop_service() {
     pkill -f "\.comfypod/run/$1\.sh" 2>/dev/null || true
     case "$1" in
         comfyui)     pkill -f "main.py --listen" 2>/dev/null || true ;;
-        filebrowser) pkill -f "$BIN_DIR/filebrowser" 2>/dev/null || true ;;
+        filebrowser) pkill -f "filebrowser -d $STATE_DIR" 2>/dev/null || true ;;
         jupyter)     pkill -f "jupyter-lab" 2>/dev/null || true ;;
         idle-guard)  pkill -f "scripts/idle-guard.sh" 2>/dev/null || true ;;
     esac
