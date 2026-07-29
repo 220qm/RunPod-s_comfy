@@ -22,23 +22,22 @@ generating again in a couple of minutes.
 
 ## Quickstart
 
-1. **Region → volume → secrets → template** — follow
-   [docs/RUNPOD_TEMPLATE.md](docs/RUNPOD_TEMPLATE.md) (one-time, ~10 min).
-   Leave the template's *Container Start Command* empty at this stage.
-2. **Deploy a pod**, open a terminal (JupyterLab → Terminal, Web Terminal or
-   SSH) and run the one-time install:
+Everything is **baked into a Docker image** built by GitHub Actions
+(`ghcr.io/220qm/comfypod:latest`) — pods install nothing at boot, so there is
+nothing on the critical path left to fail.
 
-   ```bash
-   curl -fsSL https://raw.githubusercontent.com/220qm/RunPod-s_comfy/main/install.sh | bash
-   ```
+1. **One-time** — follow [docs/RUNPOD_TEMPLATE.md](docs/RUNPOD_TEMPLATE.md):
+   pick region → create volume → click *Run workflow* on the **build-image**
+   Action (then set the package public) → add secrets → create the template
+   pointing at the image, start command empty.
+2. **Every time after that**: Deploy → pick GPU → pick template → done.
+3. Open the pod **logs** — a connection block prints your URLs (password
+   shown once only if it was auto-generated). The very first boot copies
+   ComfyUI to the volume (~2 min) and downloads ~105 GB of models in the
+   background; every later boot is up in well under a minute.
 
-   (private repo: `export GITHUB_TOKEN=ghp_...` first)
-3. **Set the template's start command** to the line the installer prints —
-   `bash /workspace/.comfypod/repo/scripts/pod-entry.sh` — and every future
-   pod boots ComfyPod automatically, with no network fetch and no token.
-4. Open the pod **logs** — a connection block prints your URLs (password shown
-   once only if it was auto-generated). First boot provisions everything and
-   downloads ~105 GB of models in the background; later boots take ~1–2 min.
+(No baked image handy? The stack also runs on the stock RunPod PyTorch image
+via a one-time `install.sh` — see the fallback section in the template docs.)
 
 | Port | Service | Login |
 |---|---|---|
@@ -140,17 +139,18 @@ Secrets (seeded to the volume on first boot):
     └── logs/                 # comfyui.log, downloads.log, auth-guard.log …
 ```
 
-The Python env itself lives on **container disk** (`/opt/comfypod-venv`) —
-network volumes are fast at streaming 14 GB weights and slow at the thousands
-of small reads Python imports need. The lockfile + uv cache on the volume make
-the rebuild a ~1 min warm operation. Set `VENV_LOCATION=volume` to trade boot
-speed for import speed the other way.
+The Python env lives on **container disk** (`/opt/comfypod-venv`) — network
+volumes are fast at streaming 14 GB weights and slow at the thousands of
+small reads Python imports need. With the baked image it ships pre-built and
+costs zero boot time; on the stock-image fallback it's rebuilt each boot from
+the lockfile via uv (~1 min warm; `VENV_LOCATION=volume` persists it instead).
 
 ## Troubleshooting
 
 | Symptom | Fix |
 |---|---|
-| **Pod boots but only the base image's Jupyter is there** (no ComfyUI on 8188, no FileBrowser on 8080) | ComfyPod never started. Check the container log for `[comfypod]` lines — none means the start command was never applied or was mangled. Recover from any pod terminal with `curl -fsSL https://raw.githubusercontent.com/220qm/RunPod-s_comfy/main/install.sh \| bash` (add `export GITHUB_TOKEN=…` if the repo is private), then set the start command to `bash /workspace/.comfypod/repo/scripts/pod-entry.sh` |
+| **Pod boots but no ComfyUI on 8188 / no FileBrowser on 8080** | ComfyPod never started. Check the container log for `[comfypod]` lines — none means the template isn't using the baked image (or, on the fallback path, the start command was never applied). With the baked image, verify the template's Container Image is `ghcr.io/220qm/comfypod:latest` and the package is public. Recover on any running pod: `curl -fsSL https://raw.githubusercontent.com/220qm/RunPod-s_comfy/main/install.sh \| bash` |
+| Image pull fails when deploying | The GHCR package is still private — repo → Packages → comfypod → Package settings → Change visibility → Public (or add GHCR credentials in RunPod's Container Registry Auth settings) |
 | Anything feels off | `comfypod-doctor` first — it checks GPU, torch, auth, disks, models |
 | "Which URL/password?" | Pod logs → connection block, or `cat /workspace/.comfypod/credentials.txt` |
 | Locked out of ComfyUI | `comfypod-secrets set-password`, or delete `/workspace/ComfyUI/login/PASSWORD` and set a new one on next visit |

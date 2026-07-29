@@ -94,7 +94,7 @@ ensure_uv() {
 }
 
 fetch_binaries() {
-    if [ ! -x "$BIN_DIR/filebrowser" ]; then
+    if [ -z "$(fb_bin)" ]; then
         log "downloading filebrowser"
         local ok=1 attempt
         for attempt in 1 2 3; do
@@ -116,6 +116,12 @@ fetch_binaries() {
 # the cost of slower imports.
 # ---------------------------------------------------------------------------
 setup_python_env() {
+    if [ "$COMFYPOD_BAKED" = "1" ]; then
+        # Everything is pre-installed in the image; only sanity-check it.
+        torch_ok || die "baked image is broken (torch cu128 missing from $VENV_DIR) — re-pull ghcr.io/220qm/comfypod:latest or rebuild it"
+        log "baked image: python env ready ($("$PY" -c 'import torch; print("torch", torch.__version__)'))"
+        return 0
+    fi
     local uv
     uv="$(uv_bin)"
     if [ ! -x "$PY" ]; then
@@ -157,6 +163,9 @@ setup_python_env() {
 }
 
 freeze_lock() {
+    # The baked env is immutable state of the image — a lockfile would only
+    # fight it on the next boot.
+    [ "$COMFYPOD_BAKED" = "1" ] && return 0
     local uv
     uv="$(uv_bin)"
     if [ -n "$uv" ]; then
@@ -176,11 +185,24 @@ resolve_latest_tag() {
 
 setup_comfyui() {
     if [ ! -d "$COMFY_DIR/.git" ]; then
-        log "cloning ComfyUI"
-        git clone --quiet "$COMFYUI_GIT" "$COMFY_DIR" || die "ComfyUI clone failed"
-        local ref="$COMFYUI_REF"
-        [ "$ref" = "latest" ] && ref="$(resolve_latest_tag)"
-        [ -n "$ref" ] && git -C "$COMFY_DIR" checkout --quiet "$ref"
+        if [ -d /opt/ComfyUI/.git ]; then
+            # Baked image: seed the volume from the image — no network needed.
+            log "seeding ComfyUI (with custom nodes) onto the volume — one-time copy, ~2 min"
+            if command -v rsync > /dev/null; then
+                run_with_heartbeat "seeding ComfyUI onto the volume" -- \
+                    rsync -a /opt/ComfyUI/ "$COMFY_DIR/" || die "seeding ComfyUI failed"
+            else
+                mkdir -p "$COMFY_DIR"
+                run_with_heartbeat "seeding ComfyUI onto the volume" -- \
+                    cp -a /opt/ComfyUI/. "$COMFY_DIR/" || die "seeding ComfyUI failed"
+            fi
+        else
+            log "cloning ComfyUI"
+            git clone --quiet "$COMFYUI_GIT" "$COMFY_DIR" || die "ComfyUI clone failed"
+            local ref="$COMFYUI_REF"
+            [ "$ref" = "latest" ] && ref="$(resolve_latest_tag)"
+            [ -n "$ref" ] && git -C "$COMFY_DIR" checkout --quiet "$ref"
+        fi
     elif [ "$AUTO_UPDATE" = "true" ]; then
         "$SCRIPT_DIR/update.sh" --comfyui-only || warn "ComfyUI auto-update failed"
     fi
@@ -259,6 +281,9 @@ setup_sage_attention() {
         log "installing sageattention v1"
         pkg_install sageattention==1.0.6 || warn "sageattention v1 install failed"
     fi
+    # Baked mode: v1 ships in the image; a background-compiled v2 would land
+    # in the ephemeral image venv and vanish on the next pod, so skip it.
+    [ "$COMFYPOD_BAKED" = "1" ] && return 0
     if ! marker_ok sage2 && command -v nvcc > /dev/null; then
         log "compiling SageAttention 2 in background (log: $LOG_DIR/sage2-build.log)"
         nohup bash -c "
@@ -296,18 +321,20 @@ start_services() {
     local admin_addr=0.0.0.0
     [ "$ADMIN_LOCAL_ONLY" = "true" ] && admin_addr=127.0.0.1
 
-    if [ -x "$BIN_DIR/filebrowser" ]; then
+    local fb
+    fb="$(fb_bin)"
+    if [ -n "$fb" ]; then
         local fb_db="$STATE_DIR/filebrowser.db"
         if [ ! -f "$fb_db" ]; then
-            "$BIN_DIR/filebrowser" config init -d "$fb_db" > /dev/null
-            "$BIN_DIR/filebrowser" config set -d "$fb_db" --auth.method=json > /dev/null
-            "$BIN_DIR/filebrowser" users add "$WEB_USER" "$WEB_PASSWORD" --perm.admin -d "$fb_db" > /dev/null \
+            "$fb" config init -d "$fb_db" > /dev/null
+            "$fb" config set -d "$fb_db" --auth.method=json > /dev/null
+            "$fb" users add "$WEB_USER" "$WEB_PASSWORD" --perm.admin -d "$fb_db" > /dev/null \
                 || warn "filebrowser user creation failed"
         else
-            "$BIN_DIR/filebrowser" users update "$WEB_USER" --password "$WEB_PASSWORD" -d "$fb_db" > /dev/null 2>&1 \
+            "$fb" users update "$WEB_USER" --password "$WEB_PASSWORD" -d "$fb_db" > /dev/null 2>&1 \
                 || warn "filebrowser password sync failed"
         fi
-        start_service filebrowser "'$BIN_DIR/filebrowser' -d '$fb_db' -r '$WORKSPACE' -a $admin_addr -p $FILEBROWSER_PORT"
+        start_service filebrowser "'$fb' -d '$fb_db' -r '$WORKSPACE' -a $admin_addr -p $FILEBROWSER_PORT"
     fi
 
     if [ "$ENABLE_JUPYTER" = "true" ] && [ -x "$VENV_DIR/bin/jupyter" ]; then

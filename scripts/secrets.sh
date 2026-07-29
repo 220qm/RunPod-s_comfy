@@ -62,8 +62,8 @@ case "${1:-}" in
         if [ -x "$PY" ]; then
             seed_login_password && log "ComfyUI-Login password updated"
         fi
-        if [ -x "$BIN_DIR/filebrowser" ] && [ -f "$STATE_DIR/filebrowser.db" ]; then
-            "$BIN_DIR/filebrowser" users update "$WEB_USER" --password "$WEB_PASSWORD" \
+        if [ -n "$(fb_bin)" ] && [ -f "$STATE_DIR/filebrowser.db" ]; then
+            "$(fb_bin)" users update "$WEB_USER" --password "$WEB_PASSWORD" \
                 -d "$STATE_DIR/filebrowser.db" > /dev/null 2>&1 && log "FileBrowser password updated"
         fi
         log "done. Restart services so Jupyter picks up the new token:"

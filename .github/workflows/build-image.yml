@@ -1,0 +1,64 @@
+# Builds the ComfyPod baked image and pushes it to GitHub's container
+# registry. The RunPod template points at ghcr.io/220qm/comfypod:latest —
+# nothing is fetched or installed at pod boot.
+#
+# Runs on every push to main that touches the image inputs, and on demand
+# from the Actions tab (workflow_dispatch).
+#
+# ONE-TIME after the first successful run: repo page -> Packages -> comfypod
+# -> Package settings -> Change visibility -> Public, so RunPod can pull it
+# without registry credentials.
+
+name: build-image
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - Dockerfile
+      - bootstrap.sh
+      - install.sh
+      - scripts/**
+      - config/**
+      - .github/workflows/build-image.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      # The runpod/pytorch devel base is huge; reclaim ~30 GB from the runner
+      # before pulling it, or the build dies with "no space left on device".
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@v1.3.1
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          swap-storage: true
+
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ghcr.io/220qm/comfypod:latest
+            ghcr.io/220qm/comfypod:${{ github.sha }}

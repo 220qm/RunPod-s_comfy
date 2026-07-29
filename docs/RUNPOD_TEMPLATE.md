@@ -1,7 +1,7 @@
-# Creating the RunPod template
+# Setting up ComfyPod on RunPod
 
-One-time setup, ~10 minutes. Afterwards every pod you spin up boots straight
-into your fully configured, password-protected ComfyUI.
+One-time setup. Afterwards deploying a pod is: pick GPU → pick template →
+Deploy. Nothing to type, nothing to fetch at boot.
 
 ## 0. Pick the region FIRST
 
@@ -19,14 +19,27 @@ availability (Deploy page) in the candidate regions for the GPUs you want
 RunPod Console → **Storage** → *New Network Volume*, in the region you chose.
 
 - **Size: 300 GB recommended** (~$21/month at $0.07/GB-month). The default
-  presets are ~105 GB, the Python lockfile/caches ~15 GB, and LoRA collecting
-  plus video outputs add up fast. 150 GB is a workable minimum if you trim
-  `DOWNLOAD_PRESETS`.
+  presets are ~105 GB, ComfyUI + caches ~10 GB, and LoRA collecting plus
+  video outputs add up fast. 150 GB works if you trim `DOWNLOAD_PRESETS`.
 - Enable **encryption** if offered — the volume holds your tokens and outputs.
-- Standard storage tier is fine to start; upgrade to the high-performance
-  tier only if model load times actually bother you.
+- Standard storage tier is fine; upgrade to high-performance only if model
+  load times actually bother you.
 
-## 2. Store your secrets
+## 2. Build the image (one-time, one click)
+
+Everything — torch, ComfyUI, custom nodes, tools — is baked into a Docker
+image by GitHub Actions, so pods never install anything at boot.
+
+1. GitHub repo → **Actions** tab → **build-image** → *Run workflow* → `main`.
+   (It also rebuilds automatically whenever `main` changes.) First build
+   takes ~30–45 min.
+2. After it finishes, make the image pullable by RunPod: repo main page →
+   **Packages** (right sidebar) → **comfypod** → *Package settings* →
+   **Change visibility → Public**. The image contains no secrets and no
+   weights, so public is safe. (Alternative: keep it private and add GHCR
+   credentials under RunPod → Settings → Container Registry Auth.)
+
+## 3. Store your secrets
 
 RunPod Console → **Settings → Secrets**. Create:
 
@@ -37,33 +50,24 @@ RunPod Console → **Settings → Secrets**. Create:
 | `CIVITAI_TOKEN` | Civitai API key — Civitai → Account Settings → API Keys |
 
 These seed the pod **once**: on first boot they are written to
-`/workspace/.comfypod/secrets.env` (mode 0600) on your volume, which is the
-canonical store from then on. You can remove the template env vars after the
-first boot if you want; rotate credentials anytime with `comfypod-secrets`.
-Avoid pasting tokens as plain-text env values — use the
-`{{ RUNPOD_SECRET_… }}` references, which are masked in the console.
+`/workspace/.comfypod/secrets.env` (0600) on your volume, the canonical store
+from then on. Rotate anytime with `comfypod-secrets`.
 
-## 3. Create the template
+## 4. Create the template
 
 RunPod Console → **Templates** → *New Template*:
 
 | Field | Value |
 |---|---|
 | Type | Pod |
-| Container Image | `runpod/pytorch:2.8.0-py3.11-cuda12.8.1-cudnn-devel-ubuntu22.04` |
-| Container Start Command | see below |
-| Container Disk | 50 GB (the Python env is rebuilt here each boot) |
+| Container Image | `ghcr.io/220qm/comfypod:latest` |
+| Container Start Command | **leave empty** (baked into the image) |
+| Container Disk | 50 GB |
 | Volume | your network volume, mount path `/workspace` |
 | Expose HTTP Ports | `8188,8080,8888` |
 | Expose TCP Ports | `22` |
 
-**Container Start Command**: leave it **empty for now** — you set it in
-step 5, after the one-time install. (RunPod's start-command field mangles
-nested quotes, and a mangled command fails silently: the pod comes up with
-only the base image's services and nothing in the log. The two-step setup
-below avoids that failure mode entirely.)
-
-**Environment variables** for the template:
+**Environment variables:**
 
 | Variable | Value |
 |---|---|
@@ -75,56 +79,19 @@ below avoids that failure mode entirely.)
 Any variable from `.env.example` can be added the same way (e.g.
 `IDLE_TIMEOUT_MINUTES`, `ADMIN_LOCAL_ONLY`).
 
-## 4. Deploy a pod and run the one-time install
+## 5. Deploy
 
 **Deploy** → pick a GPU → select your template + network volume → *Deploy*.
+That's the whole routine, every time.
 
-The pod comes up with only the base image's services (JupyterLab on 8888,
-SSH) — expected, the start command is still empty. Open a terminal
-(**JupyterLab → Terminal**, RunPod **Web Terminal**, or SSH) and run:
+- The container log shows `[comfypod]` lines within seconds of the container
+  starting — if they're missing, the image/template isn't applied.
+- **First boot ever**: ComfyUI is copied to the volume (~2 min) and ~105 GB
+  of models download in the background (15–30 min on datacenter bandwidth) —
+  the UI is usable while they download. **This happens once per volume.**
+- **Every later boot**: services up in well under a minute; models in place.
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/220qm/RunPod-s_comfy/main/install.sh | bash
-```
-
-If the repo is **private**, export a read-only PAT first (also add it as the
-`GITHUB_TOKEN` template secret so future updates work):
-
-```bash
-export GITHUB_TOKEN=ghp_xxx
-curl -fsSL -H "Authorization: Bearer $GITHUB_TOKEN" https://raw.githubusercontent.com/220qm/RunPod-s_comfy/main/install.sh | bash
-```
-
-This clones the repo onto the volume and provisions everything, printing
-progress live. It ends by showing the exact start command for step 5.
-
-## 5. Make it automatic
-
-Edit your template → **Container Start Command** → paste exactly this single
-line, with no quotes around it:
-
-```
-bash /workspace/.comfypod/repo/scripts/pod-entry.sh
-```
-
-That's it. It reads from the network volume, so it needs no GitHub access and
-no token, has nothing for RunPod's field parser to mangle, and prints boot
-progress straight into the pod's container log. Every pod you deploy from now
-on starts ComfyPod by itself — step 4's manual install is never needed again
-(the volume already has everything).
-
-**Sanity check on the next boot**: the container log should contain
-`[comfypod] pod-entry: starting bootstrap`. If it doesn't, the start command
-was not applied — re-check the template field.
-
-- **First boot**: ~5–8 min until ComfyUI is reachable (env build + nodes),
-  while ~105 GB of models download in the background (typically 15–30 min on
-  datacenter bandwidth). Everything lands on the volume — **this happens once**.
-- **Every later boot**: the Python env is restored from the lockfile via the
-  volume cache (~1 min); models are already in place.
-
-Open the pod's **Logs** for the connection block (URLs + credentials), or use
-**Connect** → the port buttons:
+Connection info (URLs + credentials) prints at the end of the boot log. Ports:
 
 | Port | Service | Login |
 |---|---|---|
@@ -133,7 +100,22 @@ Open the pod's **Logs** for the connection block (URLs + credentials), or use
 | 8888 | JupyterLab | token = password |
 | 22 | SSH | your RunPod key |
 
-Run `comfypod-doctor` in any pod shell to health-check the whole stack.
+Run `comfypod-doctor` in any pod terminal to health-check the whole stack.
+
+## Fallback: no baked image
+
+The stack also runs on the stock `runpod/pytorch:2.8.0-py3.11-cuda12.8.1-cudnn-devel-ubuntu22.04`
+image (first boot then installs torch etc., ~10 min slower):
+
+1. Deploy a pod from the stock image with the same volume/ports/env, leaving
+   the start command empty. In a pod terminal:
+   ```bash
+   curl -fsSL https://raw.githubusercontent.com/220qm/RunPod-s_comfy/main/install.sh | bash
+   ```
+   (private repo: `export GITHUB_TOKEN=ghp_...` first, and add
+   `-H "Authorization: Bearer $GITHUB_TOKEN"` to the curl)
+2. Set the template's start command to the line the installer prints:
+   `bash /workspace/.comfypod/repo/scripts/pod-entry.sh`
 
 ## Cost notes (list prices, July 2026 — verify on the pricing page)
 
@@ -141,15 +123,14 @@ Run `comfypod-doctor` in any pod shell to health-check the whole stack.
 - GPU (Secure Cloud): 4090 ≈ $0.69/hr · 5090 ≈ $0.99/hr.
 - **Idle auto-stop is on by default** (30 min with no job, no open UI tab and
   no download → pod stops; volume persists). Tune with
-  `IDLE_TIMEOUT_MINUTES`, disable with `0`. It needs `runpodctl` and a
-  `RUNPOD_API_KEY` on the pod (present on official images; otherwise add a
-  pod-scoped API key as a secret).
+  `IDLE_TIMEOUT_MINUTES`, disable with `0`. Needs `runpodctl` and a
+  `RUNPOD_API_KEY` on the pod.
 
 ## GPU notes
 
 | GPU | VRAM | Fit |
 |---|---|---|
-| RTX 5090 | 32 GB | Best choice. Blackwell (sm_120) needs CUDA 12.8 builds — handled (torch cu128, pinned and guarded). Krea 2 fp8 and Wan 2.2 fp8 run fully in VRAM. |
+| RTX 5090 | 32 GB | Best choice. Blackwell (sm_120) needs CUDA 12.8 builds — baked in (torch cu128, pinned and guarded). Krea 2 fp8 and Wan 2.2 fp8 run fully in VRAM. |
 | RTX 4090 | 24 GB | Excellent. Wan 2.2 14B fp8 leans on ComfyUI's automatic offloading for the dual experts — pick a pod with ≥ 60 GB system RAM. |
 | RTX PRO 4500 | 32 GB (Blackwell) | Same sm_120 handling as the 5090; less raw compute, cheaper, works fine. |
 
@@ -159,10 +140,3 @@ The RunPod HTTP proxy closes connections after ~100 s. FileBrowser uploads
 are chunked and survive this, but for multi-GB inputs prefer SSH/SFTP
 (`scp big.mp4 root@<pod>:/workspace/ComfyUI/input/`) or fetch server-side by
 URL (`comfy-dl url <url> input`).
-
-## Optional: baked Docker image
-
-The bootstrap adds ~1 min to a cold container. To shave that off, build and
-push the included `Dockerfile` and set it as the template's Container Image
-(keep the same env/ports; the start command is baked in, leave it empty).
-The image contains no weights and no secrets, so it's safe to push publicly.
