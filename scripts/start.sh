@@ -96,9 +96,16 @@ ensure_uv() {
 fetch_binaries() {
     if [ ! -x "$BIN_DIR/filebrowser" ]; then
         log "downloading filebrowser"
-        curl -fsSL "https://github.com/filebrowser/filebrowser/releases/latest/download/linux-amd64-filebrowser.tar.gz" \
-            | tar -xz -C "$BIN_DIR" filebrowser 2>/dev/null \
-            && chmod +x "$BIN_DIR/filebrowser" || warn "filebrowser download failed"
+        local ok=1 attempt
+        for attempt in 1 2 3; do
+            curl -fsSL --retry 2 --retry-delay 2 \
+                "https://github.com/filebrowser/filebrowser/releases/latest/download/linux-amd64-filebrowser.tar.gz" \
+                | tar -xz -C "$BIN_DIR" filebrowser 2>/dev/null \
+                && chmod +x "$BIN_DIR/filebrowser" && { ok=0; break; }
+            warn "filebrowser download attempt $attempt failed"
+            sleep 3
+        done
+        [ "$ok" -eq 0 ] || warn "filebrowser unavailable after 3 attempts — file manager will be skipped this boot; it retries next boot"
     fi
 }
 
@@ -121,20 +128,25 @@ setup_python_env() {
         fi
     fi
     if [ -f "$LOCK_FILE" ]; then
-        log "restoring python env from lockfile"
+        log "restoring python env from lockfile (can take a few minutes on a cold cache)"
         if [ -n "$uv" ]; then
-            "$uv" pip sync -q --python "$PY" \
+            run_with_heartbeat "restoring python env" -- \
+                "$uv" pip sync --python "$PY" \
                 --index-url https://pypi.org/simple --extra-index-url "$TORCH_INDEX" \
                 "$LOCK_FILE" || warn "lock sync failed — rebuilding from scratch"
         else
-            "$PIP" install -q -r "$LOCK_FILE" --extra-index-url "$TORCH_INDEX" \
+            run_with_heartbeat "restoring python env" -- \
+                "$PIP" install -r "$LOCK_FILE" --extra-index-url "$TORCH_INDEX" \
                 || warn "lock restore failed — rebuilding from scratch"
         fi
     fi
     if ! torch_ok; then
-        log "installing torch (cu128) — one-time download, cached afterwards"
+        log "installing torch (cu128) — the single biggest one-time download in this"
+        log "boot (bundles the CUDA runtime, often several GB); cached afterwards."
+        log "Progress prints below every 20s so this never looks stuck."
         # shellcheck disable=SC2086
-        pkg_install $TORCH_SPEC --index-url "$TORCH_INDEX" || die "torch install failed"
+        run_with_heartbeat "installing torch" -- \
+            pkg_install_loud $TORCH_SPEC --index-url "$TORCH_INDEX" || die "torch install failed"
     fi
     pkg_install hf_transfer "huggingface_hub[cli]" opencv-python-headless bcrypt \
         || warn "extras install failed"
@@ -179,7 +191,8 @@ setup_comfyui() {
     if [ "$(printf 'v0.26.0\n%s\n' "$tag" | sort -V | head -n1)" != "v0.26.0" ]; then
         warn "ComfyUI $tag is older than v0.26.0 — Krea 2 will not load; run comfypod-update"
     fi
-    pkg_install -r "$COMFY_DIR/requirements.txt" || warn "ComfyUI requirements install failed"
+    run_with_heartbeat "installing ComfyUI requirements" -- \
+        pkg_install -r "$COMFY_DIR/requirements.txt" || warn "ComfyUI requirements install failed"
 }
 
 # nodes.txt line format: <git-url>[@commit-or-tag]
