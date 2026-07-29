@@ -1,0 +1,7 @@
+# Krea 2 RAW (text-to-image) — the undistilled base model: more variation,
+# more steps (~28), the one to use for LoRA training targets.
+# Shares text encoder + VAE with the krea2 preset (skipped if already present).
+# size: ~18 GB (~12 GB if krea2 preset already downloaded)
+diffusion_models|krea2_raw_fp8_scaled.safetensors|https://huggingface.co/Comfy-Org/Krea-2/resolve/main/diffusion_models/krea2_raw_fp8_scaled.safetensors
+text_encoders|qwen3vl_4b_fp8_scaled.safetensors|https://huggingface.co/Comfy-Org/Krea-2/resolve/main/text_encoders/qwen3vl_4b_fp8_scaled.safetensors
+vae|qwen_image_vae.safetensors|https://huggingface.co/Comfy-Org/Krea-2/resolve/main/vae/qwen_image_vae.safetensors

@@ -1,0 +1,34 @@
+# Custom nodes installed on first boot (one git URL per line).
+# Kept deliberately lean and battle-tested; add your own here or via the
+# EXTRA_NODES env var (comma-separated git URLs). ComfyUI-Manager can install
+# anything else from the UI later.
+
+# Node/model manager UI — install nodes & models from inside ComfyUI
+https://github.com/Comfy-Org/ComfyUI-Manager
+
+# Video: encode/decode/combine (required by nearly every video workflow)
+https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite
+
+# Kijai's utility nodes (torch compile, image resize, mask ops — Wan staples)
+https://github.com/kijai/ComfyUI-KJNodes
+
+# Advanced Wan video wrapper (context windows, long videos, extra samplers)
+https://github.com/kijai/ComfyUI-WanVideoWrapper
+
+# GGUF quantized model loading (run bigger models on smaller VRAM)
+https://github.com/city96/ComfyUI-GGUF
+
+# Quality-of-life: reroutes, groups, fast muters, image comparer
+https://github.com/rgthree/rgthree-comfy
+
+# GPU/CPU/RAM monitor in the ComfyUI toolbar
+https://github.com/crystian/ComfyUI-Crystools
+
+# Autocomplete, snap-to-grid, workflow image metadata
+https://github.com/pythongosssss/ComfyUI-Custom-Scripts
+
+# Compact essential utilities (resize, sharpen, simple math)
+https://github.com/cubiq/ComfyUI_essentials
+
+# RIFE frame interpolation — smooth/extend generated videos
+https://github.com/Fannovel16/ComfyUI-Frame-Interpolation
