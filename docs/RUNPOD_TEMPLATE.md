@@ -57,22 +57,11 @@ RunPod Console → **Templates** → *New Template*:
 | Expose HTTP Ports | `8188,8080,8888` |
 | Expose TCP Ports | `22` |
 
-**Container Start Command** (public repo):
-
-```bash
-bash -c '(curl -fsSL https://raw.githubusercontent.com/220qm/RunPod-s_comfy/main/bootstrap.sh | bash) >> /workspace/comfypod-boot.log 2>&1 & exec /start.sh'
-```
-
-> **Using a branch other than `main`?** Swap the branch in the raw URL *and*
-> add a `COMFYPOD_BRANCH` env var with the branch name so the on-volume clone
-> tracks the same branch.
-
-If this repo is **private**: add a `GITHUB_TOKEN` secret (fine-grained PAT,
-read-only on this repo) and use:
-
-```bash
-bash -c '(curl -fsSL -H "Authorization: Bearer $GITHUB_TOKEN" https://raw.githubusercontent.com/220qm/RunPod-s_comfy/main/bootstrap.sh | bash) >> /workspace/comfypod-boot.log 2>&1 & exec /start.sh'
-```
+**Container Start Command**: leave it **empty for now** — you set it in
+step 5, after the one-time install. (RunPod's start-command field mangles
+nested quotes, and a mangled command fails silently: the pod comes up with
+only the base image's services and nothing in the log. The two-step setup
+below avoids that failure mode entirely.)
 
 **Environment variables** for the template:
 
@@ -81,15 +70,52 @@ bash -c '(curl -fsSL -H "Authorization: Bearer $GITHUB_TOKEN" https://raw.github
 | `WEB_PASSWORD` | `{{ RUNPOD_SECRET_WEB_PASSWORD }}` |
 | `HF_TOKEN` | `{{ RUNPOD_SECRET_HF_TOKEN }}` |
 | `CIVITAI_TOKEN` | `{{ RUNPOD_SECRET_CIVITAI_TOKEN }}` |
-| `GITHUB_TOKEN` | `{{ RUNPOD_SECRET_GITHUB_TOKEN }}` (private repo only) |
 | `DOWNLOAD_PRESETS` | `krea2,wan22-5b,wan22-t2v,wan22-i2v,upscale` (optional, this is the default) |
 
 Any variable from `.env.example` can be added the same way (e.g.
 `IDLE_TIMEOUT_MINUTES`, `ADMIN_LOCAL_ONLY`).
 
-## 4. Deploy a pod
+## 4. Deploy a pod and run the one-time install
 
 **Deploy** → pick a GPU → select your template + network volume → *Deploy*.
+
+The pod comes up with only the base image's services (JupyterLab on 8888,
+SSH) — expected, the start command is still empty. Open a terminal
+(**JupyterLab → Terminal**, RunPod **Web Terminal**, or SSH) and run:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/220qm/RunPod-s_comfy/main/install.sh | bash
+```
+
+If the repo is **private**, export a read-only PAT first (also add it as the
+`GITHUB_TOKEN` template secret so future updates work):
+
+```bash
+export GITHUB_TOKEN=ghp_xxx
+curl -fsSL -H "Authorization: Bearer $GITHUB_TOKEN" https://raw.githubusercontent.com/220qm/RunPod-s_comfy/main/install.sh | bash
+```
+
+This clones the repo onto the volume and provisions everything, printing
+progress live. It ends by showing the exact start command for step 5.
+
+## 5. Make it automatic
+
+Edit your template → **Container Start Command** → paste exactly this single
+line, with no quotes around it:
+
+```
+bash /workspace/.comfypod/repo/scripts/pod-entry.sh
+```
+
+That's it. It reads from the network volume, so it needs no GitHub access and
+no token, has nothing for RunPod's field parser to mangle, and prints boot
+progress straight into the pod's container log. Every pod you deploy from now
+on starts ComfyPod by itself — step 4's manual install is never needed again
+(the volume already has everything).
+
+**Sanity check on the next boot**: the container log should contain
+`[comfypod] pod-entry: starting bootstrap`. If it doesn't, the start command
+was not applied — re-check the template field.
 
 - **First boot**: ~5–8 min until ComfyUI is reachable (env build + nodes),
   while ~105 GB of models download in the background (typically 15–30 min on

@@ -24,8 +24,19 @@ generating again in a couple of minutes.
 
 1. **Region → volume → secrets → template** — follow
    [docs/RUNPOD_TEMPLATE.md](docs/RUNPOD_TEMPLATE.md) (one-time, ~10 min).
-2. **Deploy a pod** with that template (5090 / 4090 / RTX PRO 4500).
-3. Open the pod **logs** — a connection block prints your URLs (password shown
+   Leave the template's *Container Start Command* empty at this stage.
+2. **Deploy a pod**, open a terminal (JupyterLab → Terminal, Web Terminal or
+   SSH) and run the one-time install:
+
+   ```bash
+   curl -fsSL https://raw.githubusercontent.com/220qm/RunPod-s_comfy/main/install.sh | bash
+   ```
+
+   (private repo: `export GITHUB_TOKEN=ghp_...` first)
+3. **Set the template's start command** to the line the installer prints —
+   `bash /workspace/.comfypod/repo/scripts/pod-entry.sh` — and every future
+   pod boots ComfyPod automatically, with no network fetch and no token.
+4. Open the pod **logs** — a connection block prints your URLs (password shown
    once only if it was auto-generated). First boot provisions everything and
    downloads ~105 GB of models in the background; later boots take ~1–2 min.
 
@@ -139,6 +150,7 @@ speed for import speed the other way.
 
 | Symptom | Fix |
 |---|---|
+| **Pod boots but only the base image's Jupyter is there** (no ComfyUI on 8188, no FileBrowser on 8080) | ComfyPod never started. Check the container log for `[comfypod]` lines — none means the start command was never applied or was mangled. Recover from any pod terminal with `curl -fsSL https://raw.githubusercontent.com/220qm/RunPod-s_comfy/main/install.sh \| bash` (add `export GITHUB_TOKEN=…` if the repo is private), then set the start command to `bash /workspace/.comfypod/repo/scripts/pod-entry.sh` |
 | Anything feels off | `comfypod-doctor` first — it checks GPU, torch, auth, disks, models |
 | "Which URL/password?" | Pod logs → connection block, or `cat /workspace/.comfypod/credentials.txt` |
 | Locked out of ComfyUI | `comfypod-secrets set-password`, or delete `/workspace/ComfyUI/login/PASSWORD` and set a new one on next visit |
