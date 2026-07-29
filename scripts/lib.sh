@@ -142,6 +142,37 @@ pkg_install() {
     fi
 }
 
+# Same as pkg_install but WITHOUT -q — for the rare installs big enough that
+# total silence would look indistinguishable from a hang (torch's cu128
+# wheels bundle the CUDA runtime libraries and can be several GB).
+pkg_install_loud() {
+    local uv
+    uv="$(uv_bin)"
+    if [ -n "$uv" ]; then
+        # shellcheck disable=SC2086
+        "$uv" pip install --python "$PY" \
+            ${PIP_CONSTRAINT:+--constraint "$PIP_CONSTRAINT"} "$@"
+    else
+        "$PIP" install "$@"
+    fi
+}
+
+# run_with_heartbeat <message> -- <command...>
+# Runs a command in the background and logs "<message> (still running, Ns)"
+# every 20s while it's alive, so a long silent step never looks like a hang.
+run_with_heartbeat() {
+    local msg="$1"; shift
+    [ "$1" = "--" ] && shift
+    "$@" &
+    local pid=$! elapsed=0
+    while kill -0 "$pid" 2>/dev/null; do
+        sleep 20
+        elapsed=$((elapsed + 20))
+        kill -0 "$pid" 2>/dev/null && log "$msg (still running, ${elapsed}s elapsed)"
+    done
+    wait "$pid"
+}
+
 torch_ok() {
     "$PY" -c 'import torch; assert torch.version.cuda and torch.version.cuda.startswith("12.8")' 2>/dev/null
 }
