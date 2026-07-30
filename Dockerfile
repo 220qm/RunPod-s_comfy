@@ -29,43 +29,21 @@ RUN curl -LsSf https://astral.sh/uv/install.sh \
 ENV VENV=/opt/comfypod-venv
 ENV TORCH_INDEX=https://download.pytorch.org/whl/cu128
 
-# Torch: try the newest consistent triple, fall back to whatever the index
-# offers, then to the last known-good set. Whatever wins is frozen into
-# /opt/constraints.txt, so the "no custom node may downgrade torch" guard
-# reflects reality instead of a hardcoded guess.
-RUN uv venv --seed --python "$(command -v python3)" "$VENV" \
-    && for spec in \
-        "torch==2.11.0 torchvision==0.26.0 torchaudio==2.11.0" \
-        "torch torchvision torchaudio" \
-        "torch==2.8.0 torchvision==0.23.0 torchaudio==2.8.0" ; do \
-        echo "== trying: $spec"; \
-        # shellcheck disable=SC2086
-        if uv pip install --python "$VENV/bin/python" $spec --index-url "$TORCH_INDEX"; then \
-            echo "== installed: $spec"; break; \
-        fi; \
-        echo "== not available on $TORCH_INDEX, trying next"; \
-    done \
-    && "$VENV/bin/python" -c "import torch" \
-    && "$VENV/bin/python" -m pip freeze 2>/dev/null \
-        | grep -iE '^(torch|torchvision|torchaudio)==' > /opt/constraints.txt \
-    && cat /opt/constraints.txt \
-    && uv cache clean
+# Override to pin a specific combination without editing this file:
+#   docker build --build-arg TORCH_CANDIDATES="torch==2.9.1 torchvision==0.24.1 torchaudio==2.9.1" .
+ARG TORCH_CANDIDATES=""
+ENV TORCH_CANDIDATES=${TORCH_CANDIDATES}
 
-# Build-time gate: a broken CUDA/arch combination fails the CI build instead
-# of reaching a pod. get_arch_list() reads the compiled binary, so this works
-# without a GPU. sm_120 = RTX 5090 / PRO 4500 (Blackwell), sm_89 = RTX 4090.
-RUN "$VENV/bin/python" - <<'PY'
-import sys, torch
-cu = torch.version.cuda
-archs = torch.cuda.get_arch_list()
-print(f"torch {torch.__version__} / CUDA {cu} / archs: {' '.join(archs)}")
-if not cu or tuple(int(x) for x in cu.split(".")[:2]) < (12, 8):
-    sys.exit(f"FAIL: CUDA {cu} < 12.8 — Blackwell (sm_120) needs 12.8+")
-for want, gpu in (("sm_120", "RTX 5090 / PRO 4500"), ("sm_89", "RTX 4090")):
-    if want not in archs:
-        sys.exit(f"FAIL: this torch has no {want} kernels — {gpu} would break at first CUDA call")
-print("OK: torch supports every targeted GPU architecture")
-PY
+# Torch: install the newest candidate that is *verified usable* on every GPU
+# we target, then freeze it into /opt/constraints.txt so the "no custom node
+# may downgrade torch" guard reflects what is really installed. Each candidate
+# is verified before it is accepted, so an unusable build makes the installer
+# move to the next candidate instead of failing the whole image.
+COPY docker/install-torch.sh docker/verify-torch.py /opt/comfypod-build/
+RUN chmod +x /opt/comfypod-build/install-torch.sh \
+    && uv venv --seed --python "$(command -v python3)" "$VENV" \
+    && /opt/comfypod-build/install-torch.sh "$VENV" "$TORCH_INDEX" /opt/constraints.txt \
+    && uv cache clean
 
 # ComfyUI at the latest release tag. Krea 2 needs >= v0.26.0, and the version
 # must be new enough to expose the System User Protection API — without it
@@ -127,15 +105,16 @@ RUN git clone --depth 1 https://github.com/thu-ml/SageAttention /tmp/sage \
     && cd / && rm -rf /tmp/sage && uv cache clean \
     && "$VENV/bin/python" -c "import sageattention; print('sageattention import OK')"
 
-# Final gate: the pinned torch must still be intact after every node and extra
-# has been installed (this is the downgrade trap the runtime also guards).
-RUN "$VENV/bin/python" - <<'PY'
-import sys, torch
-print(f"final: torch {torch.__version__} / CUDA {torch.version.cuda}")
-if "sm_120" not in torch.cuda.get_arch_list():
-    sys.exit("FAIL: something downgraded torch during the build — sm_120 kernels are gone")
-print("OK: torch survived the full build")
-PY
+# Final gate: torch must still be usable after every node and extra has been
+# installed. This is the downgrade trap the runtime also guards against — here
+# it fails the CI build rather than a pod. Unlike the per-candidate check, a
+# failure here is fatal: something actively broke a known-good install.
+RUN "$VENV/bin/python" /opt/comfypod-build/verify-torch.py \
+    || { echo "FAIL: a node or extra downgraded torch during the build"; \
+         echo "Expected (frozen after torch install):"; cat /opt/constraints.txt; \
+         echo "Actually installed now:"; \
+         "$VENV/bin/pip" freeze | grep -iE '^(torch|torchvision|torchaudio)=='; \
+         exit 1; }
 
 # Tells the runtime scripts to skip everything that is already baked.
 ENV COMFYPOD_BAKED=1
