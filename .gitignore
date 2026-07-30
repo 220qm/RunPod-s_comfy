@@ -1,3 +1,7 @@
 # Local secrets — never commit a filled-in env file
 .env
 *.env.local
+
+# Python bytecode
+__pycache__/
+*.pyc
