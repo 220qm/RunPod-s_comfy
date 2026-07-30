@@ -1,10 +1,10 @@
 # ComfyPod baked image — the one-click deployment path.
 #
 # Everything that used to happen at pod boot (torch download, venv build,
-# ComfyUI clone, node installs, binary downloads) happens HERE, once, in CI.
-# A pod booting from this image only seeds the volume and starts services —
-# there is no network fetch on the critical path, so the whole class of
-# "silent boot failure" disappears.
+# ComfyUI clone, node installs, binary downloads, SageAttention compile)
+# happens HERE, once, in CI. A pod booting from this image only seeds the
+# volume and starts services — no network fetch on the critical path, so the
+# whole class of "silent boot failure" disappears.
 #
 # Built and pushed automatically by .github/workflows/build-image.yml to
 #   ghcr.io/220qm/comfypod:latest
@@ -26,21 +26,57 @@ RUN curl -LsSf https://astral.sh/uv/install.sh \
         | tar -xz -C /usr/local/bin filebrowser \
     && chmod +x /usr/local/bin/filebrowser
 
-# The torch pin every install in this image must obey (same trap-protection
-# the runtime applies via PIP_CONSTRAINT on the volume).
-RUN printf 'torch==2.8.0\ntorchvision==0.23.0\ntorchaudio==2.8.0\n' > /opt/constraints.txt
-
 ENV VENV=/opt/comfypod-venv
+ENV TORCH_INDEX=https://download.pytorch.org/whl/cu128
+
+# Torch: try the newest consistent triple, fall back to whatever the index
+# offers, then to the last known-good set. Whatever wins is frozen into
+# /opt/constraints.txt, so the "no custom node may downgrade torch" guard
+# reflects reality instead of a hardcoded guess.
 RUN uv venv --seed --python "$(command -v python3)" "$VENV" \
-    && uv pip install --python "$VENV/bin/python" --constraint /opt/constraints.txt \
-        torch==2.8.0 torchvision==0.23.0 torchaudio==2.8.0 \
-        --index-url https://download.pytorch.org/whl/cu128 \
+    && for spec in \
+        "torch==2.11.0 torchvision==0.26.0 torchaudio==2.11.0" \
+        "torch torchvision torchaudio" \
+        "torch==2.8.0 torchvision==0.23.0 torchaudio==2.8.0" ; do \
+        echo "== trying: $spec"; \
+        # shellcheck disable=SC2086
+        if uv pip install --python "$VENV/bin/python" $spec --index-url "$TORCH_INDEX"; then \
+            echo "== installed: $spec"; break; \
+        fi; \
+        echo "== not available on $TORCH_INDEX, trying next"; \
+    done \
+    && "$VENV/bin/python" -c "import torch" \
+    && "$VENV/bin/python" -m pip freeze 2>/dev/null \
+        | grep -iE '^(torch|torchvision|torchaudio)==' > /opt/constraints.txt \
+    && cat /opt/constraints.txt \
     && uv cache clean
 
-# ComfyUI at the latest release tag (>= v0.26.0 needed for Krea 2)
+# Build-time gate: a broken CUDA/arch combination fails the CI build instead
+# of reaching a pod. get_arch_list() reads the compiled binary, so this works
+# without a GPU. sm_120 = RTX 5090 / PRO 4500 (Blackwell), sm_89 = RTX 4090.
+RUN "$VENV/bin/python" - <<'PY'
+import sys, torch
+cu = torch.version.cuda
+archs = torch.cuda.get_arch_list()
+print(f"torch {torch.__version__} / CUDA {cu} / archs: {' '.join(archs)}")
+if not cu or tuple(int(x) for x in cu.split(".")[:2]) < (12, 8):
+    sys.exit(f"FAIL: CUDA {cu} < 12.8 — Blackwell (sm_120) needs 12.8+")
+for want, gpu in (("sm_120", "RTX 5090 / PRO 4500"), ("sm_89", "RTX 4090")):
+    if want not in archs:
+        sys.exit(f"FAIL: this torch has no {want} kernels — {gpu} would break at first CUDA call")
+print("OK: torch supports every targeted GPU architecture")
+PY
+
+# ComfyUI at the latest release tag. Krea 2 needs >= v0.26.0, and the version
+# must be new enough to expose the System User Protection API — without it
+# ComfyUI-Manager force-sets security_level=strong and every install is
+# blocked no matter how it is configured.
 RUN git clone https://github.com/comfyanonymous/ComfyUI /opt/ComfyUI \
     && cd /opt/ComfyUI \
     && git checkout "$(git tag -l 'v*' --sort=-version:refname | head -n1)" \
+    && git describe --tags \
+    && grep -q "def get_system_user_directory" folder_paths.py \
+        || { echo "FAIL: ComfyUI lacks get_system_user_directory — Manager installs would be blocked"; exit 1; } \
     && uv pip install --python "$VENV/bin/python" --constraint /opt/constraints.txt \
         -r requirements.txt \
     && uv cache clean
@@ -67,12 +103,39 @@ RUN set -e; \
     done \
     && uv cache clean
 
-# Runtime extras: downloads, auth hashing, terminal, SageAttention v1
-# (v1 is the pip wheel used by the KJNodes "Patch Sage Attention" node)
+# Runtime extras: downloads, auth hashing, terminal.
 RUN uv pip install --python "$VENV/bin/python" --constraint /opt/constraints.txt \
         hf_transfer "huggingface_hub[cli]" opencv-python-headless bcrypt \
-        jupyterlab sageattention==1.0.6 \
+        jupyterlab \
     && uv cache clean
+
+# SageAttention 2 compiled here rather than in a background job on the pod:
+# ~30% faster sampling, and the build cost is paid once in CI. Arch list is
+# explicit because CI has no GPU to query. Falls back to the v1 pip wheel if
+# the source build fails, so a SageAttention regression can never break the
+# image. Used per-workflow via the KJNodes "Patch Sage Attention" node — the
+# global --use-sage-attention flag stays off (black output on Wan/Qwen).
+RUN git clone --depth 1 https://github.com/thu-ml/SageAttention /tmp/sage \
+    && cd /tmp/sage \
+    && { TORCH_CUDA_ARCH_LIST="8.9;12.0" EXT_PARALLEL=4 NVCC_APPEND_FLAGS="--threads 8" MAX_JOBS=8 \
+         uv pip install --python "$VENV/bin/python" --constraint /opt/constraints.txt \
+             --no-build-isolation . \
+         && echo "SageAttention 2 built from source"; } \
+    || { echo "WARN: SageAttention 2 build failed, falling back to the v1 wheel"; \
+         uv pip install --python "$VENV/bin/python" --constraint /opt/constraints.txt \
+             sageattention==1.0.6; } \
+    && cd / && rm -rf /tmp/sage && uv cache clean \
+    && "$VENV/bin/python" -c "import sageattention; print('sageattention import OK')"
+
+# Final gate: the pinned torch must still be intact after every node and extra
+# has been installed (this is the downgrade trap the runtime also guards).
+RUN "$VENV/bin/python" - <<'PY'
+import sys, torch
+print(f"final: torch {torch.__version__} / CUDA {torch.version.cuda}")
+if "sm_120" not in torch.cuda.get_arch_list():
+    sys.exit("FAIL: something downgraded torch during the build — sm_120 kernels are gone")
+print("OK: torch survived the full build")
+PY
 
 # Tells the runtime scripts to skip everything that is already baked.
 ENV COMFYPOD_BAKED=1

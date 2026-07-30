@@ -15,7 +15,8 @@ generating again in a couple of minutes.
 | 🔒 **Private by default** | ComfyUI behind **ComfyUI-Login** (cookie/session auth that also guards the API and survives the WebSocket handshake, unlike basic auth). An auth-guard verifies the login page actually intercepts before ComfyUI stays on a public bind — otherwise it's forced back to localhost (fail closed). FileBrowser has its own login; Jupyter is token-protected. |
 | 🔑 **API keys** | HF/Civitai tokens sent as `Authorization: Bearer` headers from 0600 files — never in URLs, process listings or logs (all logging is secret-redacted) |
 | 💾 **Persistent** | Models, nodes, workflows, outputs, credentials, package lockfile and caches on `/workspace`; the Python env rebuilds on fast container disk each boot via **uv** (~1 min warm) |
-| 🛡️ **Stable** | torch pinned via constraints on **every** install path — no custom node can silently downgrade torch and brick a 5090 (sm_120). Versions stay pinned until you run `comfypod-update`; `comfypod-snapshot restore baseline` undoes a broken update. |
+| 🛡️ **Stable** | torch pinned via constraints on **every** install path — no custom node can silently downgrade torch and brick a 5090 (sm_120). The image build *verifies* torch carries `sm_120`/`sm_89` kernels and fails in CI rather than on your pod. Versions stay pinned until `comfypod-update`; `comfypod-snapshot restore baseline` undoes a broken update. |
+| ⚡ **Tuned** | torch 2.11 (newest triple where torch/vision/audio align) on CUDA 12.8, SageAttention 2 compiled into the image, `--fast fp16_accumulation` on by default, `expandable_segments` for Wan's dual-expert VRAM churn |
 | 🧩 **Managers** | ComfyUI-Manager (nodes) + ComfyUI-Model-Manager (in-UI model browser with HF/Civitai tokens) + 7 more curated nodes |
 | 📁 **Filesystem** | FileBrowser (upload/download anything) + JupyterLab (terminal, pip) + SSH; `ADMIN_LOCAL_ONLY=true` locks both behind an SSH tunnel |
 | 💸 **Cost-aware** | Idle auto-stop (default 30 min: no job, no open tab, no download → pod stops, volume persists) |
@@ -46,8 +47,28 @@ via a one-time `install.sh` — see the fallback section in the template docs.)
 | 8888 | JupyterLab — terminal, notebooks | token = password |
 | 22 | SSH | RunPod key |
 
-CLI helpers in any pod shell: `comfy-dl`, `comfypod-doctor`,
+CLI helpers in any pod shell: `comfy-dl`, `comfypod-node`, `comfypod-doctor`,
 `comfypod-secrets`, `comfypod-snapshot`, `comfypod-update`, `comfypod-stop`.
+
+## Installing custom nodes
+
+Two paths, both persistent:
+
+- **ComfyUI-Manager UI** — works out of the box. Because RunPod's proxy forces
+  ComfyUI to bind `0.0.0.0`, Manager considers the session "not local" and by
+  default refuses unlisted/git-URL installs, so ComfyPod sets
+  `security_level = weak` plus `allow_git_url_install` / `allow_pip_install`
+  in Manager's own config. That deliberately trades Manager's guard-rail for a
+  working install button — everything is still behind the login password. Set
+  `MANAGER_SECURITY_LEVEL=normal` for registry-only installs.
+- **`comfypod-node add <git-url>`** — a path that never depends on the UI, and
+  unlike Manager it *records* the node in `/workspace/.comfypod/extra-nodes.txt`
+  so future pods reinstall it automatically. Also `list`, `remove`, `fix`.
+
+Every boot re-asserts the Python dependencies of **every** node on the volume
+(including ones added through Manager). That matters because the venv ships
+inside the image and is therefore ephemeral — without it, a Manager-installed
+node would come back next pod with its dependencies missing.
 
 ## Generating
 
@@ -97,6 +118,8 @@ Secrets (seeded to the volume on first boot):
 | `IDLE_TIMEOUT_MINUTES` | `30` | auto-stop after fully idle minutes (`0` = never) |
 | `ADMIN_LOCAL_ONLY` | `false` | `true` = FileBrowser/Jupyter only via SSH tunnel |
 | `SAGE_ATTENTION` | `auto` | installed for per-workflow patching; `global` opts into the risky launch flag; `off` |
+| `FAST_MODE` | `fp16_accumulation` | ComfyUI `--fast` optimizations; `all` for every one (riskier), `off` for stock |
+| `MANAGER_SECURITY_LEVEL` | `weak` | what ComfyUI-Manager may install (see below); `normal` = registry nodes only |
 | `VENV_LOCATION` | `container` | `volume` = persist the venv instead of rebuilding |
 | `EXTRA_NODES` | — | comma-separated git URLs (`url@commit` to pin) |
 | `COMFYUI_FLAGS` | — | extra ComfyUI args (`--fast`, `--highvram`, …) |
@@ -159,6 +182,8 @@ the lockfile via uv (~1 min warm; `VENV_LOCATION=volume` persists it instead).
 | Gated model 401/403 | `comfypod-secrets set-hf-token` (and accept the license on the HF model page once) |
 | Black video frames | You enabled global SageAttention — set `SAGE_ATTENTION=auto` and use the Patch Sage Attention node instead |
 | Node update broke the graph | `comfypod-snapshot restore baseline` (or the auto-saved `pre-update-*`) |
+| **Manager can't install/update nodes** | `comfypod-doctor` names the cause. Most often ComfyUI is too old to expose the System User Protection API, in which case Manager force-sets `security_level=strong` and blocks everything regardless of config → `comfypod-update`. Otherwise set `MANAGER_SECURITY_LEVEL=weak` and restart. Guaranteed fallback: `comfypod-node add <git-url>` |
+| A node imports fine but its Python deps are missing | `comfypod-node fix` (reinstalls requirements for every node), then restart |
 | Wonky Python state | `rm -rf /opt/comfypod-venv` → next boot rebuilds from the lockfile; `rm /workspace/.comfypod/requirements.lock` too for a from-scratch resolve |
 
 ## First-run validation checklist

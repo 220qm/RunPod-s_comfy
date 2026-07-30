@@ -24,16 +24,26 @@ else
 fi
 
 if [ -x "$PY" ]; then
-    tv="$("$PY" -c 'import torch; print(torch.__version__, torch.version.cuda)' 2>/dev/null)" || tv=""
-    if [ -z "$tv" ]; then
+    if ! "$PY" -c 'import torch' 2>/dev/null; then
         bad "torch does not import — rebuild env: rm -rf $VENV_DIR && bash $SCRIPT_DIR/start.sh"
     elif ! torch_ok; then
-        bad "torch is $tv, expected cu128 — a node likely downgraded it; rebuild env (see above)"
+        bad "torch/GPU mismatch: $(torch_check 2>&1 | tail -1)"
+        bad "  ($(torch_report)) — a custom node likely downgraded torch; rebuild: rm -rf $VENV_DIR && bash $SCRIPT_DIR/start.sh"
     else
-        ok "torch $tv"
-        cap="$("$PY" -c 'import torch; c = torch.cuda.get_device_capability(); print(f"sm_{c[0]}{c[1]}")' 2>/dev/null)" \
-            && ok "CUDA capability $cap usable from torch" \
-            || bad "torch cannot talk to the GPU (capability query failed)"
+        ok "$(torch_report)"
+    fi
+    # CUDA 13 wheels need a much newer driver than CUDA 12.8 ones; a mismatch
+    # shows up as torch failing at the first CUDA call, not at import.
+    drv="$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -1)"
+    cu_major="$("$PY" -c 'import torch; print((torch.version.cuda or "0.0").split(".")[0])' 2>/dev/null)"
+    if [ -n "$drv" ] && [ -n "$cu_major" ]; then
+        need=525; [ "$cu_major" = "13" ] && need=580
+        drv_major="${drv%%.*}"
+        if [ "${drv_major:-0}" -lt "$need" ] 2>/dev/null; then
+            bad "driver $drv is too old for a CUDA $cu_major build (needs >= $need) — use a cu128 image or a newer host"
+        else
+            ok "driver $drv supports the installed CUDA $cu_major build"
+        fi
     fi
 else
     bad "venv missing at $VENV_DIR — run: bash $SCRIPT_DIR/start.sh"
@@ -85,6 +95,37 @@ esac
 
 [ -f "$COMFY_DIR/login/PASSWORD" ] && ok "ComfyUI-Login password file present" \
     || wrn "ComfyUI-Login password file missing — first visitor will be asked to set one"
+
+# --- ComfyUI-Manager install/update capability -------------------------------
+if [ -d "$COMFY_DIR/custom_nodes/ComfyUI-Manager" ]; then
+    if ! comfy_has_system_user_api; then
+        bad "ComfyUI is too old to expose the System User Protection API — Manager"
+        bad "  force-sets security_level=strong and blocks ALL installs. Fix: comfypod-update"
+    else
+        mcfg="$(manager_config_path)"
+        if [ -f "$mcfg" ]; then
+            lvl="$(sed -n 's/^[[:space:]]*security_level[[:space:]]*=[[:space:]]*//p' "$mcfg" | tail -1)"
+            case "$lvl" in
+                weak)
+                    ok "Manager security_level=weak — installs work on a 0.0.0.0 bind" ;;
+                normal|normal-)
+                    wrn "Manager security_level=$lvl — registry nodes install, but unlisted/git-URL"
+                    wrn "  nodes are blocked because ComfyUI binds 0.0.0.0. Set MANAGER_SECURITY_LEVEL=weak" ;;
+                strong)
+                    bad "Manager security_level=strong — all installs blocked; set MANAGER_SECURITY_LEVEL=weak and restart" ;;
+                *)
+                    wrn "Manager security_level not set in $mcfg (defaults to 'normal')" ;;
+            esac
+            for flag in allow_git_url_install allow_pip_install; do
+                grep -qE "^[[:space:]]*${flag}[[:space:]]*=[[:space:]]*true" "$mcfg" \
+                    && ok "Manager $flag=true" \
+                    || wrn "Manager $flag is not true — that class of install will be refused"
+            done
+        else
+            wrn "Manager config not written yet ($mcfg) — restart to apply: bash $SCRIPT_DIR/start.sh"
+        fi
+    fi
+fi
 
 # --- secrets hygiene -------------------------------------------------------
 for f in "$SECRETS_FILE" "$STATE_DIR/credentials.txt"; do

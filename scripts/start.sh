@@ -245,6 +245,23 @@ install_node() {
     fi
 }
 
+# Python deps for EVERY node present on the volume — including ones installed
+# from the Manager UI. Without this the venv (which is part of the image in
+# baked mode, and therefore ephemeral) would come up next boot missing their
+# requirements, and the node would silently fail to import.
+heal_node_deps() {
+    local dir name count=0
+    for dir in "$COMFY_DIR"/custom_nodes/*/; do
+        [ -d "$dir" ] || continue
+        name="$(basename "$dir")"
+        case "$name" in __pycache__|*.disabled) continue ;; esac
+        [ -f "$dir/requirements.txt" ] || continue
+        pkg_install -r "$dir/requirements.txt" || warn "requirements failed: $name"
+        count=$((count + 1))
+    done
+    log "re-asserted python deps for $count custom node(s)"
+}
+
 setup_custom_nodes() {
     mkdir -p "$COMFY_DIR/custom_nodes"
     local nodes_file="$REPO_DIR/config/nodes.txt" spec dir
@@ -258,6 +275,14 @@ setup_custom_nodes() {
             install_node "$spec"
         done
     fi
+    # Nodes added with `comfypod-node add` (persisted on the volume)
+    if [ -f "$STATE_DIR/extra-nodes.txt" ]; then
+        while IFS= read -r spec; do
+            case "$spec" in ''|'#'*) continue ;; esac
+            install_node "$spec"
+        done < "$STATE_DIR/extra-nodes.txt"
+    fi
+    run_with_heartbeat "checking custom node dependencies" -- heal_node_deps
     # Record the exact commit of every node (the rollback primitive).
     : > "$NODES_LOCK.tmp"
     for dir in "$COMFY_DIR"/custom_nodes/*/; do
@@ -268,6 +293,39 @@ setup_custom_nodes() {
     done
     mv "$NODES_LOCK.tmp" "$NODES_LOCK"
     [ -f "$SNAPSHOT_DIR/baseline.lock" ] || cp "$NODES_LOCK" "$SNAPSHOT_DIR/baseline.lock"
+}
+
+# ComfyUI-Manager: make its install/update buttons actually work behind
+# RunPod's proxy. Manager treats a 0.0.0.0 bind as "not local", which blocks
+# unlisted/git-URL installs unless security_level is 'weak'; git-URL and pip
+# installs need their own flags on top. Existing keys are preserved.
+configure_manager() {
+    [ -d "$COMFY_DIR/custom_nodes/ComfyUI-Manager" ] || return 0
+    local cfg
+    cfg="$(manager_config_path)"
+    mkdir -p "$(dirname "$cfg")"
+    MANAGER_CFG="$cfg" MANAGER_SECURITY_LEVEL="$MANAGER_SECURITY_LEVEL" "$PY" - <<'PY' || { warn "could not write Manager config"; return 1; }
+import configparser, os
+path = os.environ["MANAGER_CFG"]
+cp = configparser.ConfigParser()
+cp.read(path)                      # keeps whatever is already configured
+if "default" not in cp:
+    cp["default"] = {}
+cp["default"]["security_level"] = os.environ["MANAGER_SECURITY_LEVEL"]
+cp["default"]["allow_git_url_install"] = "true"
+cp["default"]["allow_pip_install"] = "true"
+with open(path, "w") as fh:
+    cp.write(fh)
+PY
+    log "ComfyUI-Manager: security_level=$MANAGER_SECURITY_LEVEL, git-URL + pip installs enabled ($cfg)"
+    if ! comfy_has_system_user_api; then
+        warn "############################################################"
+        warn "# This ComfyUI is too old to expose the System User"
+        warn "# Protection API, so ComfyUI-Manager FORCES security_level"
+        warn "# to 'strong' and blocks every install/update regardless of"
+        warn "# the config above. Fix with:  comfypod-update"
+        warn "############################################################"
+    fi
 }
 
 # SageAttention: installed for per-workflow use (KJNodes "Patch Sage
@@ -312,7 +370,16 @@ start_services() {
     if [ "$SAGE_ATTENTION" = "global" ] && "$PY" -c 'import sageattention' 2>/dev/null; then
         sage_flag=" --use-sage-attention"
     fi
-    start_service comfyui "cd '$COMFY_DIR' && LISTEN=\$(cat '$STATE_DIR/comfy-listen' 2>/dev/null || echo 127.0.0.1) && '$PY' main.py --listen \"\$LISTEN\" --port $COMFYUI_PORT --preview-method auto$sage_flag $COMFYUI_FLAGS"
+    # fp16 accumulation: large sampling speedup on 40/50-series, negligible
+    # quality cost. "all" enables the riskier --fast features too.
+    local fast_flag=""
+    case "$FAST_MODE" in
+        off|'')            fast_flag="" ;;
+        all)               fast_flag=" --fast" ;;
+        *)                 fast_flag=" --fast $FAST_MODE" ;;
+    esac
+    log "performance: FAST_MODE=$FAST_MODE, SAGE_ATTENTION=$SAGE_ATTENTION"
+    start_service comfyui "cd '$COMFY_DIR' && LISTEN=\$(cat '$STATE_DIR/comfy-listen' 2>/dev/null || echo 127.0.0.1) && '$PY' main.py --listen \"\$LISTEN\" --port $COMFYUI_PORT --preview-method auto$sage_flag$fast_flag $COMFYUI_FLAGS"
 
     if ! pgrep -f "scripts/auth-guard.sh" > /dev/null; then
         nohup bash "$SCRIPT_DIR/auth-guard.sh" >> "$LOG_DIR/auth-guard.log" 2>&1 &
@@ -366,6 +433,7 @@ install_cli_shims() {
     ln -sf "$SCRIPT_DIR/doctor.sh" /usr/local/bin/comfypod-doctor 2>/dev/null || true
     ln -sf "$SCRIPT_DIR/secrets.sh" /usr/local/bin/comfypod-secrets 2>/dev/null || true
     ln -sf "$SCRIPT_DIR/snapshot.sh" /usr/local/bin/comfypod-snapshot 2>/dev/null || true
+    ln -sf "$SCRIPT_DIR/node.sh" /usr/local/bin/comfypod-node 2>/dev/null || true
 }
 
 print_connection_info() {
@@ -407,6 +475,7 @@ main() {
     setup_python_env
     setup_comfyui
     setup_custom_nodes
+    configure_manager || true
     seed_login_password || true
     setup_sage_attention
     freeze_lock
