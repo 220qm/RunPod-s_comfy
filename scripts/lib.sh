@@ -217,16 +217,30 @@ torch_check() {
     "$PY" - <<'PY'
 import sys
 import torch
+
 cu = torch.version.cuda
 if not cu:
-    sys.exit("torch has no CUDA support")
+    sys.exit("torch has no CUDA support (CPU-only build)")
 if tuple(int(x) for x in cu.split(".")[:2]) < (12, 8):
     sys.exit(f"CUDA {cu} is older than 12.8 (Blackwell needs >= 12.8)")
-if torch.cuda.is_available():
-    major, minor = torch.cuda.get_device_capability()
-    archs = torch.cuda.get_arch_list()
-    if not any(a in archs for a in (f"sm_{major}{minor}", f"compute_{major}{minor}")):
-        sys.exit(f"torch lacks kernels for sm_{major}{minor} (has: {', '.join(archs)})")
+
+if not torch.cuda.is_available():
+    sys.exit("torch cannot see the GPU (driver mismatch, or no GPU on this pod)")
+
+major, minor = torch.cuda.get_device_capability()
+archs = torch.cuda.get_arch_list()
+if not archs:
+    sys.exit(0)  # nothing to compare against; the CUDA tag already passed
+# Same rules as docker/verify-torch.py: an exact cubin, an older cubin of the
+# same major (binary compatible), or same-major PTX all count as support.
+for a in archs:
+    for prefix in ("sm_", "compute_"):
+        if a.startswith(prefix):
+            d = a[len(prefix):]
+            if d.isdigit() and len(d) >= 2:
+                if int(d[:-1]) == major and int(d[-1]) <= minor:
+                    sys.exit(0)
+sys.exit(f"torch lacks kernels for sm_{major}{minor} (has: {', '.join(archs)})")
 PY
 }
 
