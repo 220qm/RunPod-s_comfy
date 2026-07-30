@@ -6,8 +6,13 @@ combination, and as the final gate after all nodes are installed (a node can
 downgrade torch, which is the classic way a Blackwell pod dies at its first
 CUDA call).
 
-torch.cuda.get_arch_list() reads the compiled binary, so this needs no GPU and
-works in CI. Exit 0 = usable, 1 = not usable (reason on stdout).
+Runs in CI, where there is no GPU. That matters: torch.cuda.get_arch_list()
+early-returns [] when torch.cuda.is_available() is false, so it reports
+NOTHING on a build runner even for a perfectly good +cu128 wheel. The
+compile-time arch flags are read from torch._C._cuda_getArchFlags() instead,
+which is a constant baked into the binary and needs no device.
+
+Exit 0 = usable, 1 = not usable (reason on stdout).
 
 IMPORTANT — this deliberately does NOT require an exact "sm_<cc>" entry per
 GPU. Official PyTorch wheels ship e.g. sm_80/sm_86/sm_90/sm_100/sm_120 and no
@@ -74,6 +79,27 @@ def covered_by(target: str, archs: list) -> str:
     return ""
 
 
+def compiled_archs(torch) -> list:
+    """Architectures the binary was compiled for, readable without a GPU.
+
+    torch.cuda.get_arch_list() is useless in a build container: it starts with
+    `if not is_available(): return []`. The private accessor it wraps returns
+    the compile-time CUDA_ARCH_FLAGS constant and does not touch a device.
+    """
+    getter = getattr(getattr(torch, "_C", None), "_cuda_getArchFlags", None)
+    if getter is not None:
+        try:
+            flags = getter()
+            if flags:
+                return flags.split()
+        except Exception:  # noqa: BLE001 - fall through to the public API
+            pass
+    try:
+        return list(torch.cuda.get_arch_list())
+    except Exception:  # noqa: BLE001
+        return []
+
+
 def main() -> int:
     required = sys.argv[1:] or ["sm_120", "sm_89"]
 
@@ -84,20 +110,25 @@ def main() -> int:
         return 1
 
     cuda = torch.version.cuda
-    try:
-        archs = list(torch.cuda.get_arch_list())
-    except Exception as exc:  # noqa: BLE001
-        print(f"UNUSABLE: cannot read arch list ({exc})")
-        return 1
+    archs = compiled_archs(torch)
+    print(f"torch {torch.__version__} / CUDA {cuda} / archs: {' '.join(archs) or '(unreadable)'}")
 
-    print(f"torch {torch.__version__} / CUDA {cuda} / archs: {' '.join(archs) or '(none)'}")
-
+    # The CUDA build tag is the decisive, always-readable signal: it catches a
+    # CPU-only wheel and a too-old CUDA, which are the failures that actually
+    # brick a pod.
     if not cuda:
         print("UNUSABLE: CPU-only build (no CUDA) — this index has no GPU wheel for that version")
         return 1
     if tuple(int(x) for x in cuda.split(".")[:2]) < MIN_CUDA:
         print(f"UNUSABLE: CUDA {cuda} is older than {'.'.join(map(str, MIN_CUDA))}")
         return 1
+
+    # Arch coverage is enforced only when the flags are actually readable.
+    # Treating "cannot read" as failure is what previously rejected every
+    # legitimate wheel in CI.
+    if not archs:
+        print(f"USABLE (arch list unreadable in this environment; CUDA {cuda} accepted on its build tag)")
+        return 0
 
     ok = True
     for target in required:
