@@ -67,7 +67,16 @@ setup_secrets() {
     set +a
     umask 077
     printf 'username: %s\npassword: %s\n' "$WEB_USER" "$WEB_PASSWORD" > "$STATE_DIR/credentials.txt"
+    secure_file "$STATE_DIR/credentials.txt" || true
     umask 022
+    # RunPod's volume filesystem can ignore chmod, which would leave these
+    # world-readable however carefully they are written. Say so once, plainly,
+    # instead of pretending they are locked down.
+    if ! fs_honours_chmod "$STATE_DIR"; then
+        warn "the volume filesystem ignores chmod, so $SECRETS_FILE stays mode $(stat -c %a "$SECRETS_FILE" 2>/dev/null)."
+        warn "  Only root runs in this container, so the practical exposure is low, but do"
+        warn "  not treat the volume as a private store for anything beyond these tokens."
+    fi
 }
 
 # ---------------------------------------------------------------------------
@@ -211,26 +220,73 @@ resolve_latest_tag() {
     git -C "$COMFY_DIR" tag -l 'v*' --sort=-version:refname | head -n1
 }
 
-setup_comfyui() {
-    if [ ! -d "$COMFY_DIR/.git" ]; then
-        if [ -d /opt/ComfyUI/.git ]; then
-            # Baked image: seed the volume from the image — no network needed.
-            log "seeding ComfyUI (with custom nodes) onto the volume — one-time copy, ~2 min"
-            if command -v rsync > /dev/null; then
-                run_with_heartbeat "seeding ComfyUI onto the volume" -- \
-                    rsync -a /opt/ComfyUI/ "$COMFY_DIR/" || die "seeding ComfyUI failed"
-            else
-                mkdir -p "$COMFY_DIR"
-                run_with_heartbeat "seeding ComfyUI onto the volume" -- \
-                    cp -a /opt/ComfyUI/. "$COMFY_DIR/" || die "seeding ComfyUI failed"
-            fi
-        else
-            log "cloning ComfyUI"
-            git clone --quiet "$COMFYUI_GIT" "$COMFY_DIR" || die "ComfyUI clone failed"
-            local ref="$COMFYUI_REF"
-            [ "$ref" = "latest" ] && ref="$(resolve_latest_tag)"
-            [ -n "$ref" ] && git -C "$COMFY_DIR" checkout --quiet "$ref"
+# Point the code tree's data directories at the volume. Only these need to
+# survive the pod; keeping the code itself on container disk is what makes
+# restarts and node installs fast (see COMFY_CODE_LOCATION in lib.sh).
+link_comfy_data() {
+    [ "$COMFY_CODE_LOCATION" = "container" ] || return 0
+    local d target
+    for d in $COMFY_DATA_SUBDIRS; do
+        target="$COMFY_DATA_DIR/$d"
+        mkdir -p "$target"
+        # Anything the image shipped in that slot (e.g. ComfyUI's default model
+        # folder skeleton) is merged onto the volume once, then replaced by a
+        # symlink so both sides see the same files.
+        if [ -d "$COMFY_DIR/$d" ] && [ ! -L "$COMFY_DIR/$d" ]; then
+            cp -a "$COMFY_DIR/$d/." "$target/" 2>/dev/null || true
+            rm -rf "${COMFY_DIR:?}/$d"
         fi
+        [ -L "$COMFY_DIR/$d" ] || ln -s "$target" "$COMFY_DIR/$d"
+    done
+    log "code on container disk ($COMFY_DIR), data on the volume ($COMFY_DATA_DIR)"
+}
+
+# Nodes the user installed through ComfyUI-Manager land in the code tree, which
+# is ephemeral when the code runs from container disk. Record their origin so
+# the next pod reinstalls them automatically.
+capture_manager_installed_nodes() {
+    [ "$COMFY_CODE_LOCATION" = "container" ] || return 0
+    local dir name url known recorded=0
+    known="$(cat "$REPO_DIR/config/nodes.txt" "$SCRIPT_DIR/../config/nodes.txt" 2>/dev/null)"
+    touch "$STATE_DIR/extra-nodes.txt"
+    for dir in "$COMFY_DIR"/custom_nodes/*/; do
+        dir="${dir%/}"
+        [ -d "$dir/.git" ] || continue
+        name="$(basename "$dir")"
+        url="$(git -C "$dir" config --get remote.origin.url 2>/dev/null)" || continue
+        [ -n "$url" ] || continue
+        case "$known" in *"$url"*) continue ;; esac                 # shipped in the image
+        grep -qF "$url" "$STATE_DIR/extra-nodes.txt" && continue     # already recorded
+        printf '%s\n' "$url" >> "$STATE_DIR/extra-nodes.txt"
+        log "recorded $name for reinstall on future pods"
+        recorded=$((recorded + 1))
+    done
+    [ "$recorded" -gt 0 ] && log "$recorded Manager-installed node(s) will persist"
+    return 0
+}
+
+setup_comfyui() {
+    if [ "$COMFY_CODE_LOCATION" = "container" ]; then
+        link_comfy_data
+        # A pre-existing volume checkout keeps its models/outputs/workflows via
+        # the symlinks above; its custom nodes are carried over by URL.
+        if [ -d "$COMFY_DATA_DIR/custom_nodes" ] && ! marker_ok migrated-volume-nodes; then
+            local d u
+            for d in "$COMFY_DATA_DIR"/custom_nodes/*/; do
+                [ -d "${d%/}/.git" ] || continue
+                u="$(git -C "${d%/}" config --get remote.origin.url 2>/dev/null)" || continue
+                [ -n "$u" ] && grep -qF "$u" "$STATE_DIR/extra-nodes.txt" 2>/dev/null \
+                    || printf '%s\n' "$u" >> "$STATE_DIR/extra-nodes.txt"
+            done
+            marker_set migrated-volume-nodes
+            log "migrated custom nodes from the previous volume layout"
+        fi
+    elif [ ! -d "$COMFY_DIR/.git" ]; then
+        log "cloning ComfyUI"
+        git clone --quiet "$COMFYUI_GIT" "$COMFY_DIR" || die "ComfyUI clone failed"
+        local ref="$COMFYUI_REF"
+        [ "$ref" = "latest" ] && ref="$(resolve_latest_tag)"
+        [ -n "$ref" ] && git -C "$COMFY_DIR" checkout --quiet "$ref"
     elif [ "$AUTO_UPDATE" = "true" ]; then
         "$SCRIPT_DIR/update.sh" --comfyui-only || warn "ComfyUI auto-update failed"
     fi
@@ -275,17 +331,35 @@ install_node() {
 # from the Manager UI. Without this the venv (which is part of the image in
 # baked mode, and therefore ephemeral) would come up next boot missing their
 # requirements, and the node would silently fail to import.
+# One resolver pass for every node instead of one per node: with ~10 nodes
+# that is the difference between a single uv call and ten, each paying its own
+# resolution and network round-trips.
 heal_node_deps() {
-    local dir name count=0
+    local dir name count=0 args=()
     for dir in "$COMFY_DIR"/custom_nodes/*/; do
         dir="${dir%/}"                       # keep paths free of a double slash
         [ -d "$dir" ] || continue
         name="$(basename "$dir")"
         case "$name" in __pycache__|*.disabled) continue ;; esac
         [ -f "$dir/requirements.txt" ] || continue
-        pkg_install -r "$dir/requirements.txt" || warn "requirements failed: $name"
+        args+=(-r "$dir/requirements.txt")
         count=$((count + 1))
     done
+    if [ "$count" -eq 0 ]; then
+        log "no custom node requirements to install"
+        return 0
+    fi
+    if ! pkg_install "${args[@]}"; then
+        # One bad requirements file must not take the others down with it.
+        warn "combined dependency install failed — retrying node by node"
+        for dir in "$COMFY_DIR"/custom_nodes/*/; do
+            dir="${dir%/}"
+            [ -f "$dir/requirements.txt" ] || continue
+            name="$(basename "$dir")"
+            case "$name" in __pycache__|*.disabled) continue ;; esac
+            pkg_install -r "$dir/requirements.txt" || warn "requirements failed: $name"
+        done
+    fi
     log "re-asserted python deps for $count custom node(s)"
 }
 
@@ -312,6 +386,7 @@ setup_custom_nodes() {
             install_node "$spec" < /dev/null
         done < "$STATE_DIR/extra-nodes.txt"
     fi
+    capture_manager_installed_nodes
     run_with_heartbeat "checking custom node dependencies" -- heal_node_deps
     # Record the exact commit of every node (the rollback primitive).
     : > "$NODES_LOCK.tmp"
