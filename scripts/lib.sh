@@ -82,9 +82,8 @@ export VENV_LOCATION="${VENV_LOCATION:-container}"
 # than parts of RunPod's fleet carry, and 12.8 already covers Blackwell sm_120.
 export TORCH_SPEC="${TORCH_SPEC:-torch==2.11.0 torchvision==0.26.0 torchaudio==2.11.0}"
 export TORCH_INDEX="${TORCH_INDEX:-https://download.pytorch.org/whl/cu128}"
-# Fallback chain for the image build: if the pinned triple is not published on
-# the chosen index, take the newest that is, then the last known-good set.
-export TORCH_SPEC_FALLBACKS="${TORCH_SPEC_FALLBACKS:-torch torchvision torchaudio|torch==2.8.0 torchvision==0.23.0 torchaudio==2.8.0}"
+# The image build's candidate chain lives in docker/install-torch.sh
+# (TORCH_CANDIDATES); TORCH_SPEC above is what a non-baked pod installs.
 
 # Set by the baked Docker image (ghcr.io/220qm/comfypod): torch, ComfyUI,
 # nodes and binaries are pre-installed, so the boot scripts skip every
@@ -191,19 +190,33 @@ pkg_install_loud() {
 }
 
 # run_with_heartbeat <message> -- <command...>
-# Runs a command in the background and logs "<message> (still running, Ns)"
-# every 20s while it's alive, so a long silent step never looks like a hang.
+# Runs a command and logs "<message> (still running, Ns)" every 20s while it
+# is alive, so a long silent step never looks like a hang.
+#
+# The job is waited on with `wait`, and the ticker lives in a separate process
+# that is killed afterwards. Polling the job with `kill -0` instead would never
+# terminate: a finished child stays a zombie until the shell reaps it, and
+# `kill -0` keeps succeeding on a zombie — an infinite loop that would have
+# hung every boot right after each wrapped step completed.
 run_with_heartbeat() {
     local msg="$1"; shift
     [ "$1" = "--" ] && shift
     "$@" &
-    local pid=$! elapsed=0
-    while kill -0 "$pid" 2>/dev/null; do
-        sleep 20
-        elapsed=$((elapsed + 20))
-        kill -0 "$pid" 2>/dev/null && log "$msg (still running, ${elapsed}s elapsed)"
-    done
+    local pid=$!
+    (
+        local elapsed=0
+        while sleep 20; do
+            kill -0 "$pid" 2>/dev/null || break
+            elapsed=$((elapsed + 20))
+            log "$msg (still running, ${elapsed}s elapsed)"
+        done
+    ) &
+    local ticker=$!
     wait "$pid"
+    local rc=$?
+    kill "$ticker" 2>/dev/null
+    wait "$ticker" 2>/dev/null
+    return "$rc"
 }
 
 # Verifies what actually matters instead of a hardcoded version string: a
@@ -245,7 +258,33 @@ PY
 }
 
 torch_report() {
-    "$PY" -c 'import torch; print(f"torch {torch.__version__} / CUDA {torch.version.cuda} / archs: {\" \".join(torch.cuda.get_arch_list())}")' 2>/dev/null
+    # No backslashes inside the f-string expression: they are a syntax error on
+    # Python < 3.12, which silently made this print nothing at all.
+    "$PY" -c 'import torch
+archs = " ".join(torch.cuda.get_arch_list()) or "(unreadable without a GPU)"
+print(f"torch {torch.__version__} / CUDA {torch.version.cuda} / archs: {archs}")' 2>/dev/null
+}
+
+# ---------------------------------------------------------------------------
+# secrets.env is sourced by every script, so values MUST be written quoted:
+# an unquoted password containing a space silently truncates, and one
+# containing ; or $( ) would execute as code at boot.
+# ---------------------------------------------------------------------------
+shell_quote() {
+    local v="$1"
+    printf "'%s'" "${v//\'/\'\\\'\'}"
+}
+
+secrets_put() {
+    local key="$1" val="$2" tmp
+    umask 077
+    touch "$SECRETS_FILE"
+    tmp="$SECRETS_FILE.tmp.$$"
+    grep -v "^$key=" "$SECRETS_FILE" > "$tmp" 2>/dev/null || : > "$tmp"
+    printf '%s=%s\n' "$key" "$(shell_quote "$val")" >> "$tmp"
+    mv "$tmp" "$SECRETS_FILE"
+    chmod 600 "$SECRETS_FILE"
+    umask 022
 }
 
 # ComfyUI-Manager's config path moved in newer ComfyUI. Manager picks it based
