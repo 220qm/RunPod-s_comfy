@@ -24,7 +24,8 @@ fail_closed() {
 }
 
 # First boot can spend minutes installing node deps before the port answers.
-deadline=$((SECONDS + 1800))
+# Configurable so tests (and impatient operators) do not wait half an hour.
+deadline=$((SECONDS + ${AUTH_GUARD_TIMEOUT:-1800}))
 body="$TMP_DIR/auth-check.$$"
 trap 'rm -f "$body"' EXIT
 while [ "$SECONDS" -lt "$deadline" ]; do

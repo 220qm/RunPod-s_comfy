@@ -16,19 +16,10 @@ source "$SCRIPT_DIR/lib.sh"
 set -uo pipefail
 ensure_dirs
 
-upsert() {
-    local key="$1" val="$2"
-    umask 077
-    touch "$SECRETS_FILE"
-    if grep -q "^$key=" "$SECRETS_FILE"; then
-        # sed with | delimiter would break on tokens containing | — rebuild instead
-        grep -v "^$key=" "$SECRETS_FILE" > "$SECRETS_FILE.tmp"
-        mv "$SECRETS_FILE.tmp" "$SECRETS_FILE"
-    fi
-    printf '%s=%s\n' "$key" "$val" >> "$SECRETS_FILE"
-    chmod 600 "$SECRETS_FILE"
-    umask 022
-}
+# Values are shell-quoted (secrets_put in lib.sh) because secrets.env is
+# sourced: an unquoted password containing a space would truncate, and one
+# containing ';' or '$(...)' would run as code on the next boot.
+upsert() { secrets_put "$1" "$2"; }
 
 read_value() {
     local prompt="$1" val

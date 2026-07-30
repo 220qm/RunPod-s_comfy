@@ -1,0 +1,47 @@
+# Fast checks on every push and PR. These run in ~1 minute and gate the
+# 40-minute image build: shell bugs, broken manifests and regressions in the
+# boot logic are caught here rather than in CI's Docker build or, worse, on a
+# rented GPU.
+
+name: ci
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install shellcheck
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+
+      - name: Shellcheck every script
+        run: shellcheck -x -S warning bootstrap.sh install.sh scripts/*.sh docker/*.sh tests/*.sh
+
+      - name: Bash syntax check
+        run: for f in bootstrap.sh install.sh scripts/*.sh docker/*.sh tests/*.sh; do bash -n "$f"; done
+
+      - name: Python syntax check
+        run: python3 -m py_compile docker/verify-torch.py
+
+      - name: Dockerfile sanity (no secrets, no weights baked in)
+        run: |
+          set -e
+          # The image must never carry credentials or model files.
+          if grep -inE '(hf_[A-Za-z0-9]{20,}|ghp_[A-Za-z0-9]{20,}|password\s*=)' Dockerfile; then
+            echo "FAIL: Dockerfile appears to contain a credential"; exit 1
+          fi
+          if grep -inE '\.safetensors|\.ckpt|\.gguf' Dockerfile; then
+            echo "FAIL: Dockerfile appears to bake model weights into the image"; exit 1
+          fi
+          grep -q 'COMFYPOD_BAKED=1' Dockerfile || { echo "FAIL: image must set COMFYPOD_BAKED=1"; exit 1; }
+          echo "OK"
+
+      - name: Test suite
+        run: bash tests/run-tests.sh

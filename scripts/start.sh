@@ -15,9 +15,25 @@ COMFYUI_GIT="https://github.com/comfyanonymous/ComfyUI.git"
 # ---------------------------------------------------------------------------
 # Torch pin, enforced on every install path (see lib.sh PIP_CONSTRAINT).
 # ---------------------------------------------------------------------------
+# The constraint file is what stops a custom node downgrading torch, so it has
+# to describe what is ACTUALLY installed. Writing $TORCH_SPEC blindly was a
+# real hazard: if the image build fell back to another version, every later
+# pip call would have tried to "restore" the pinned one — re-downloading
+# gigabytes on every boot and breaking the baked environment.
 write_constraints() {
-    printf '%s\n' $TORCH_SPEC > "$CONSTRAINTS_FILE"
+    if [ "$COMFYPOD_BAKED" = "1" ] && [ -s /opt/constraints.txt ]; then
+        cp /opt/constraints.txt "$CONSTRAINTS_FILE"          # frozen at build time
+    elif [ -x "$PY" ] && "$PY" -c 'import torch' 2>/dev/null; then
+        "$PY" -m pip freeze 2>/dev/null \
+            | grep -iE '^(torch|torchvision|torchaudio)==' > "$CONSTRAINTS_FILE"
+    fi
+    # Nothing installed yet (first boot on a stock image): fall back to the pin.
+    if [ ! -s "$CONSTRAINTS_FILE" ]; then
+        # shellcheck disable=SC2086
+        printf '%s\n' $TORCH_SPEC > "$CONSTRAINTS_FILE"
+    fi
     export PIP_CONSTRAINT="$CONSTRAINTS_FILE"
+    log "torch constraint: $(tr '\n' ' ' < "$CONSTRAINTS_FILE")"
 }
 
 # ---------------------------------------------------------------------------
@@ -28,23 +44,28 @@ write_constraints() {
 setup_secrets() {
     umask 077
     touch "$SECRETS_FILE"
+    chmod 600 "$SECRETS_FILE"
     local key val
     for key in WEB_USER WEB_PASSWORD HF_TOKEN CIVITAI_TOKEN; do
         val="${!key}"
+        # Values are shell-quoted on write (secrets_put): this file is sourced,
+        # so a password containing a space, quote or ';' must not truncate or
+        # execute.
         if [ -n "$val" ] && ! grep -q "^$key=" "$SECRETS_FILE"; then
-            printf '%s=%s\n' "$key" "$val" >> "$SECRETS_FILE"
+            secrets_put "$key" "$val"
         fi
     done
     PASSWORD_SOURCE="configured"
     if ! grep -q '^WEB_PASSWORD=' "$SECRETS_FILE"; then
         WEB_PASSWORD="$(head -c 24 /dev/urandom | base64 | tr '+/' '-_' | head -c 20)"
-        printf 'WEB_PASSWORD=%s\n' "$WEB_PASSWORD" >> "$SECRETS_FILE"
+        secrets_put WEB_PASSWORD "$WEB_PASSWORD"
         PASSWORD_SOURCE="generated"
     fi
     set -a
     # shellcheck disable=SC1090
     . "$SECRETS_FILE"
     set +a
+    umask 077
     printf 'username: %s\npassword: %s\n' "$WEB_USER" "$WEB_PASSWORD" > "$STATE_DIR/credentials.txt"
     umask 022
 }
@@ -118,8 +139,15 @@ fetch_binaries() {
 setup_python_env() {
     if [ "$COMFYPOD_BAKED" = "1" ]; then
         # Everything is pre-installed in the image; only sanity-check it.
-        torch_ok || die "baked image is broken (torch cu128 missing from $VENV_DIR) — re-pull ghcr.io/220qm/comfypod:latest or rebuild it"
-        log "baked image: python env ready ($("$PY" -c 'import torch; print("torch", torch.__version__)'))"
+        # Deliberately a warning, not a die: a transient driver problem or a
+        # CPU-only pod must still boot far enough to reach a shell, the logs
+        # and comfypod-doctor.
+        if torch_ok; then
+            log "baked image: python env ready ($(torch_report))"
+        else
+            warn "baked image torch check failed: $(torch_check 2>&1 | tail -1)"
+            warn "  continuing so the pod stays reachable — run comfypod-doctor for details"
+        fi
         return 0
     fi
     local uv
@@ -234,13 +262,11 @@ install_node() {
             git clone --quiet --depth 1 "$url" "$dir" || { warn "clone failed: $name"; return 1; }
         fi
     fi
-    # Re-assert python deps every boot: cheap with uv, and it heals a fresh
-    # container venv or a node the Manager updated mid-session.
-    if [ -f "$dir/requirements.txt" ]; then
-        pkg_install -r "$dir/requirements.txt" || warn "requirements failed: $name"
-    fi
+    # requirements.txt is intentionally NOT installed here — heal_node_deps
+    # does it once for every node on the volume, so doing it here too would
+    # install the same set twice on every boot.
     if [ -f "$dir/install.py" ] && ! marker_ok "node-setup-$name"; then
-        (cd "$dir" && timeout 600 "$PY" install.py) || warn "install.py failed: $name"
+        (cd "$dir" && timeout 600 "$PY" install.py < /dev/null) || warn "install.py failed: $name"
         marker_set "node-setup-$name"
     fi
 }
@@ -252,6 +278,7 @@ install_node() {
 heal_node_deps() {
     local dir name count=0
     for dir in "$COMFY_DIR"/custom_nodes/*/; do
+        dir="${dir%/}"                       # keep paths free of a double slash
         [ -d "$dir" ] || continue
         name="$(basename "$dir")"
         case "$name" in __pycache__|*.disabled) continue ;; esac
@@ -266,20 +293,23 @@ setup_custom_nodes() {
     mkdir -p "$COMFY_DIR/custom_nodes"
     local nodes_file="$REPO_DIR/config/nodes.txt" spec dir
     [ -f "$nodes_file" ] || nodes_file="$SCRIPT_DIR/../config/nodes.txt"
+    # `< /dev/null` on every install: git and pip read stdin, and inside a
+    # `while read ... done < file` loop they would otherwise swallow the
+    # remaining lines and silently skip nodes.
     while IFS= read -r spec; do
         case "$spec" in ''|'#'*) continue ;; esac
-        install_node "$spec"
+        install_node "$spec" < /dev/null
     done < "$nodes_file"
     if [ -n "$EXTRA_NODES" ]; then
         for spec in ${EXTRA_NODES//,/ }; do
-            install_node "$spec"
+            install_node "$spec" < /dev/null
         done
     fi
     # Nodes added with `comfypod-node add` (persisted on the volume)
     if [ -f "$STATE_DIR/extra-nodes.txt" ]; then
         while IFS= read -r spec; do
             case "$spec" in ''|'#'*) continue ;; esac
-            install_node "$spec"
+            install_node "$spec" < /dev/null
         done < "$STATE_DIR/extra-nodes.txt"
     fi
     run_with_heartbeat "checking custom node dependencies" -- heal_node_deps
@@ -473,6 +503,7 @@ main() {
     ensure_uv
     fetch_binaries
     setup_python_env
+    write_constraints          # re-derive from what actually got installed
     setup_comfyui
     setup_custom_nodes
     configure_manager || true
