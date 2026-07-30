@@ -56,6 +56,17 @@ export ENABLE_JUPYTER="${ENABLE_JUPYTER:-true}"
 # global: also pass --use-sage-attention (at your own risk)
 # off: skip entirely
 export SAGE_ATTENTION="${SAGE_ATTENTION:-auto}"
+# ComfyUI --fast optimizations. fp16_accumulation is the well-tested ~20-30%
+# sampling speedup on 40/50-series with negligible quality impact.
+#   fp16_accumulation (default) | all (every --fast feature, riskier) | off
+export FAST_MODE="${FAST_MODE:-fp16_accumulation}"
+# ComfyUI-Manager security level: strong | normal | normal- | weak.
+# RunPod's proxy requires ComfyUI to bind 0.0.0.0, which Manager treats as
+# "not local mode" — and in that mode installing an unlisted/git-URL node
+# needs 'weak'. Everything is still behind the ComfyUI-Login password; this
+# trades Manager's own guard-rail for a working install button. Set 'normal'
+# to allow only registry nodes.
+export MANAGER_SECURITY_LEVEL="${MANAGER_SECURITY_LEVEL:-weak}"
 # true: bind FileBrowser/Jupyter to 127.0.0.1 (reach via SSH tunnel only)
 export ADMIN_LOCAL_ONLY="${ADMIN_LOCAL_ONLY:-false}"
 # Auto-stop the pod after this many fully idle minutes (0 = never)
@@ -64,8 +75,16 @@ export IDLE_TIMEOUT_MINUTES="${IDLE_TIMEOUT_MINUTES:-30}"
 #            uv (fast imports; network volumes are slow at many small reads).
 # volume:    venv persisted on /workspace (no rebuild, slower imports).
 export VENV_LOCATION="${VENV_LOCATION:-container}"
-export TORCH_SPEC="${TORCH_SPEC:-torch==2.8.0 torchvision==0.23.0 torchaudio==2.8.0}"
+# Newest mutually consistent torch triple: torchaudio caps at 2.11.0, so
+# 2.11.0 / 0.26.0 / 2.11.0 is the latest set where all three align (it is also
+# what the community Blackwell SageAttention 2.x wheels target). cu128 rather
+# than the newer cu130 default: CUDA 13 wheels need a much newer NVIDIA driver
+# than parts of RunPod's fleet carry, and 12.8 already covers Blackwell sm_120.
+export TORCH_SPEC="${TORCH_SPEC:-torch==2.11.0 torchvision==0.26.0 torchaudio==2.11.0}"
 export TORCH_INDEX="${TORCH_INDEX:-https://download.pytorch.org/whl/cu128}"
+# Fallback chain for the image build: if the pinned triple is not published on
+# the chosen index, take the newest that is, then the last known-good set.
+export TORCH_SPEC_FALLBACKS="${TORCH_SPEC_FALLBACKS:-torch torchvision torchaudio|torch==2.8.0 torchvision==0.23.0 torchaudio==2.8.0}"
 
 # Set by the baked Docker image (ghcr.io/220qm/comfypod): torch, ComfyUI,
 # nodes and binaries are pre-installed, so the boot scripts skip every
@@ -187,8 +206,48 @@ run_with_heartbeat() {
     wait "$pid"
 }
 
-torch_ok() {
-    "$PY" -c 'import torch; assert torch.version.cuda and torch.version.cuda.startswith("12.8")' 2>/dev/null
+# Verifies what actually matters instead of a hardcoded version string: a
+# CUDA build >= 12.8, and — when a GPU is visible — that this GPU's compute
+# capability is among the architectures torch was compiled for. That is the
+# direct test for the Blackwell (sm_120) trap; a version check only proxied it.
+# torch_check prints the reason on failure; torch_ok is the silent boolean.
+torch_ok() { torch_check > /dev/null 2>&1; }
+
+torch_check() {
+    "$PY" - <<'PY'
+import sys
+import torch
+cu = torch.version.cuda
+if not cu:
+    sys.exit("torch has no CUDA support")
+if tuple(int(x) for x in cu.split(".")[:2]) < (12, 8):
+    sys.exit(f"CUDA {cu} is older than 12.8 (Blackwell needs >= 12.8)")
+if torch.cuda.is_available():
+    major, minor = torch.cuda.get_device_capability()
+    archs = torch.cuda.get_arch_list()
+    if not any(a in archs for a in (f"sm_{major}{minor}", f"compute_{major}{minor}")):
+        sys.exit(f"torch lacks kernels for sm_{major}{minor} (has: {', '.join(archs)})")
+PY
+}
+
+torch_report() {
+    "$PY" -c 'import torch; print(f"torch {torch.__version__} / CUDA {torch.version.cuda} / archs: {\" \".join(torch.cuda.get_arch_list())}")' 2>/dev/null
+}
+
+# ComfyUI-Manager's config path moved in newer ComfyUI. Manager picks it based
+# on whether ComfyUI exposes the System User Protection API — and when that API
+# is ABSENT it force-sets security_level=strong, blocking every install no
+# matter what the config says (the usual cause of a dead install button).
+comfy_has_system_user_api() {
+    grep -q "def get_system_user_directory" "$COMFY_DIR/folder_paths.py" 2>/dev/null
+}
+
+manager_config_path() {
+    if comfy_has_system_user_api; then
+        printf '%s' "$COMFY_DIR/user/__manager/config.ini"
+    else
+        printf '%s' "$COMFY_DIR/user/default/ComfyUI-Manager/config.ini"
+    fi
 }
 
 # Seed ComfyUI-Login's password file from WEB_PASSWORD (bcrypt hash; the hash
