@@ -45,7 +45,7 @@ export WEB_USER="${WEB_USER:-admin}"
 export WEB_PASSWORD="${WEB_PASSWORD:-}"
 export HF_TOKEN="${HF_TOKEN:-}"
 export CIVITAI_TOKEN="${CIVITAI_TOKEN:-}"
-export DOWNLOAD_PRESETS="${DOWNLOAD_PRESETS:-krea2,wan22-5b,wan22-t2v,wan22-i2v,upscale}"
+export DOWNLOAD_PRESETS="${DOWNLOAD_PRESETS:-krea2,minimax-h3,upscale}"
 export COMFYUI_REF="${COMFYUI_REF:-latest}"
 export COMFYUI_FLAGS="${COMFYUI_FLAGS:-}"
 export EXTRA_NODES="${EXTRA_NODES:-}"
@@ -53,7 +53,8 @@ export AUTO_UPDATE="${AUTO_UPDATE:-false}"
 export ENABLE_JUPYTER="${ENABLE_JUPYTER:-true}"
 # auto: install SageAttention for per-workflow use (KJNodes "Patch Sage
 #       Attention") but do NOT enable it globally — the global flag has
-#       produced black output on Wan/Qwen-family models.
+#       produced black output on Qwen-family text encoders, which both
+#       Krea 2 and MiniMax H3 use.
 # global: also pass --use-sage-attention (at your own risk)
 # off: skip entirely
 export SAGE_ATTENTION="${SAGE_ATTENTION:-auto}"
@@ -144,8 +145,8 @@ export JUPYTER_PORT=8888
 export HF_HOME="${HF_HOME:-$CACHE_DIR/hf}"
 export HF_HUB_ENABLE_HF_TRANSFER="${HF_HUB_ENABLE_HF_TRANSFER:-1}"
 export UV_CACHE_DIR="${UV_CACHE_DIR:-$CACHE_DIR/uv}"
-# Wan A14B alternates two 14B experts in VRAM; expandable segments avoids the
-# fragmentation OOMs that come with that pattern.
+# MiniMax H3 swaps a 32B text encoder and the diffusion model in and out of
+# VRAM; expandable segments avoids the fragmentation OOMs that pattern causes.
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
 # Torch pin enforced on EVERY pip in this environment — including pips spawned
 # by ComfyUI-Manager — so no custom node can silently downgrade torch.

@@ -1,7 +1,7 @@
 # ComfyPod — private, persistent ComfyUI on RunPod
 
 One template, one boot script. Spin up any GPU pod and get a **password-protected
-ComfyUI** with **Krea 2** (image) and **Wan 2.2** (video) pre-provisioned, plus a
+ComfyUI** with **Krea 2** (image) and **MiniMax H3** (video + native audio) pre-provisioned, plus a
 file manager, JupyterLab, a token-aware model downloader and a health-check
 doctor — everything durable stored on your **network volume**, so models,
 nodes, settings and credentials are set up **once** and every later pod is
@@ -11,12 +11,12 @@ generating again in a couple of minutes.
 
 | | |
 |---|---|
-| 🎨 **Models** | Krea 2 Turbo (fp8), Wan 2.2 TI2V-5B + T2V/I2V 14B (fp8) with Lightning 4-step LoRAs, upscalers — the best open-weights quality that fits 24–32 GB GPUs |
+| 🎨 **Models** | Krea 2 Turbo (fp8) for images, MiniMax H3 FL2VA (fp8) for text-to-video **and** image-to-video with native audio, upscalers |
 | 🔒 **Private by default** | ComfyUI behind **ComfyUI-Login** (cookie/session auth that also guards the API and survives the WebSocket handshake, unlike basic auth). An auth-guard verifies the login page actually intercepts before ComfyUI stays on a public bind — otherwise it's forced back to localhost (fail closed). FileBrowser has its own login; Jupyter is token-protected. |
 | 🔑 **API keys** | HF/Civitai tokens sent as `Authorization: Bearer` headers from 0600 files — never in URLs, process listings or logs (all logging is secret-redacted) |
 | 💾 **Persistent** | Models, nodes, workflows, outputs, credentials, package lockfile and caches on `/workspace`; the Python env rebuilds on fast container disk each boot via **uv** (~1 min warm) |
 | 🛡️ **Stable** | torch pinned via constraints on **every** install path — no custom node can silently downgrade torch and brick a 5090 (sm_120). The image build *verifies* torch carries `sm_120`/`sm_89` kernels and fails in CI rather than on your pod. Versions stay pinned until `comfypod-update`; `comfypod-snapshot restore baseline` undoes a broken update. |
-| ⚡ **Tuned** | torch 2.11 (newest triple where torch/vision/audio align) on CUDA 12.8, SageAttention 2 compiled into the image, `--fast fp16_accumulation` on by default, `expandable_segments` for Wan's dual-expert VRAM churn |
+| ⚡ **Tuned** | torch 2.11 (newest triple where torch/vision/audio align) on CUDA 12.8, SageAttention 2 compiled into the image, `--fast fp16_accumulation` on by default, `expandable_segments` to survive the text-encoder/diffusion offload churn |
 | 🧩 **Managers** | ComfyUI-Manager (nodes) + ComfyUI-Model-Manager (in-UI model browser with HF/Civitai tokens) + 7 more curated nodes |
 | 📁 **Filesystem** | FileBrowser (upload/download anything) + JupyterLab (terminal, pip) + SSH; `ADMIN_LOCAL_ONLY=true` locks both behind an SSH tunnel |
 | 💸 **Cost-aware** | Idle auto-stop (default 30 min: no job, no open tab, no download → pod stops, volume persists) |
@@ -34,7 +34,7 @@ nothing on the critical path left to fail.
 2. **Every time after that**: Deploy → pick GPU → pick template → done.
 3. Open the pod **logs** — a connection block prints your URLs (password
    shown once only if it was auto-generated). The very first boot copies
-   ComfyUI to the volume (~2 min) and downloads ~105 GB of models in the
+   ComfyUI to the volume (~2 min) and downloads ~56 GB of models in the
    background; every later boot is up in well under a minute.
 
 (No baked image handy? The stack also runs on the stock RunPod PyTorch image
@@ -74,26 +74,29 @@ node would come back next pod with its dependencies missing.
 
 Use ComfyUI's built-in **Browse Templates** — official, tested graphs for
 exactly these models. [workflows/README.md](workflows/README.md) maps each
-model preset to its template and lists the gotchas (VAE pairing, Lightning
-LoRA toggle, per-workflow SageAttention patching).
+model preset to its template and lists the gotchas (first/last-frame wiring,
+the offload pause, Blackwell-vs-Ada quantisation, per-workflow SageAttention).
 
 - **Krea 2 Turbo**: ~8 steps, CFG 1. ~12.5 GB VRAM in fp8.
   License: Krea 2 Community License (free commercial use under 50 seats — not
-  Apache/MIT). Krea's realtime *video* model has no ComfyUI support; video is
-  Wan's job here. Wan 2.2 is Apache-2.0.
-- **Wan 2.2 5B**: fast drafts, 720p/24fps comfortably on 24 GB.
-- **Wan 2.2 14B T2V/I2V**: best open-weights quality (Wan 2.5/2.6/2.7 remain
-  API-only). Lightning LoRAs give 4-step generation; disable them and raise
-  steps (~20) for maximum motion fidelity.
+  Apache/MIT).
+- **MiniMax H3 (FL2VA)**: one checkpoint covers both modes — prompt only for
+  text-to-video, or drive `first_frame` / `last_frame` on the
+  **MiniMaxH3ImageToVideo** node for image-to-video. It generates **native
+  audio** alongside the video, which is why the preset pulls two VAEs.
+- **VRAM reality check**: the fp8 diffusion model (~21 GB) plus the Qwen3-VL-32B
+  text encoder does not fit in 32 GB at once, so ComfyUI offloads between the
+  two. Expect a pause the first time a prompt is encoded. On a 4090/Ada use the
+  `minimax-h3-ada` preset — NVFP4 is Blackwell-only.
 
 ## Getting more models
 
 All token-aware, tokens injected automatically:
 
 1. **ComfyUI-Model-Manager** — browse/download HF & Civitai from inside the UI.
-2. **Presets**: `comfy-dl preset krea2-raw` (see `comfy-dl list`):
-   `krea2` ~18 GB · `krea2-raw` ~18 GB · `wan22-5b` ~18 GB · `wan22-t2v` ~38 GB
-   · `wan22-i2v` ~38 GB · `upscale` ~0.2 GB
+2. **Presets**: `comfy-dl preset minimax-h3-ref` (see `comfy-dl list`):
+   `krea2` ~18 GB · `krea2-raw` ~18 GB · `minimax-h3` ~38 GB ·
+   `minimax-h3-ref` ~21 GB · `minimax-h3-ada` ~55 GB · `upscale` ~0.2 GB
 3. **Any URL**: `comfy-dl url <huggingface-or-civitai-url> [folder]`, or
    `comfy-dl civitai <version-id> [folder]`.
 4. **Upload** via FileBrowser into `ComfyUI/models/<folder>` (multi-GB files:
@@ -114,7 +117,7 @@ Secrets (seeded to the volume on first boot):
 |---|---|---|
 | `WEB_USER` / `WEB_PASSWORD` | `admin` / auto-generated | login for all services |
 | `HF_TOKEN` / `CIVITAI_TOKEN` | — | download auth (Bearer headers) |
-| `DOWNLOAD_PRESETS` | `krea2,wan22-5b,wan22-t2v,wan22-i2v,upscale` | models fetched on boot (`all`/`none`) |
+| `DOWNLOAD_PRESETS` | `krea2,minimax-h3,upscale` | models fetched on boot (`all`/`none`) |
 | `IDLE_TIMEOUT_MINUTES` | `30` | auto-stop after fully idle minutes (`0` = never) |
 | `ADMIN_LOCAL_ONLY` | `false` | `true` = FileBrowser/Jupyter only via SSH tunnel |
 | `SAGE_ATTENTION` | `auto` | installed for per-workflow patching; `global` opts into the risky launch flag; `off` |
@@ -189,8 +192,8 @@ the lockfile via uv (~1 min warm; `VENV_LOCATION=volume` persists it instead).
 ## First-run validation checklist
 
 On the first real pod, confirm: fresh volume → generating (time it) · pod
-terminate → new pod → nothing re-downloads · Krea 2 image, Wan 5B clip, Wan
-14B I2V clip all render · every exposed port rejects unauthenticated requests
+terminate → new pod → nothing re-downloads · Krea 2 image, MiniMax H3
+text-to-video clip and image-to-video clip all render · every exposed port rejects unauthenticated requests
 (`comfypod-doctor` checks ComfyUI's) · an interrupted download resumes ·
 idle-stop triggers on an idle pod but not during a long job.
 
@@ -199,9 +202,12 @@ idle-stop triggers on an idle pod but not during a long job.
 - **Krea 2 Turbo (fp8_scaled)** — Krea's open-weights 12B DiT (June 2026),
   top-10 on the Artificial Analysis T2I leaderboard; Turbo is the 8-step
   distilled variant for interactive use, RAW one preset away.
-- **Wan 2.2 (fp8_scaled)** — the strongest *open-weights* video family; fp8
-  beats GGUF on quality at 24–32 GB (GGUF loader installed as the OOM
-  fallback). 5B tier for drafts, 14B MoE for quality.
+- **MiniMax H3 FL2VA (pruned fp8_scaled)** — open-weights omni-modal video with
+  native audio (Aug 2026, day-0 ComfyUI support). One checkpoint serves both
+  text-to-video and first/last-frame image-to-video, so there is no separate
+  T2V/I2V download. The pruned variants are what fit a single GPU — bf16 is
+  66 GB. Its text encoder has no fp8 build, so the preset pairs it with the
+  NVFP4 AWQ Qwen3-VL-32B (Blackwell-only; `minimax-h3-ada` covers 4090/Ada).
 - **ComfyUI-Login over basic-auth proxy** — browsers don't reliably attach
   `Authorization` headers to WebSocket upgrades, and ComfyUI's progress
   channel is a WebSocket; cookie auth survives it on every browser.

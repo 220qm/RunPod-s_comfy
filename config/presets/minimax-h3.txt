@@ -1,0 +1,35 @@
+# MiniMax H3 — open-weights omni-modal video model with native audio.
+#
+# FL2VA is the checkpoint that covers BOTH of the modes you want:
+#   * text-to-video      — prompt only
+#   * image-to-video     — drive first_frame and/or last_frame on the
+#                          MiniMaxH3ImageToVideo node
+# (Ref2VA, the reference-driven variant, is a separate preset: minimax-h3-ref)
+#
+# Quantisation choices, for a 32 GB card (RTX 5090):
+#   diffusion    pruned fp8_scaled  ~21 GB  — as requested; the pruned variants
+#                are the ones that fit a single GPU (bf16 is 66 GB)
+#   text encoder Qwen3-VL-32B, NVFP4 AWQ ~16 GB — there is NO fp8 build of the
+#                text encoder. bf16 (~64 GB) and int8 (~32 GB) do not leave
+#                room for the diffusion model, so NVFP4 is the only sane pick
+#                on 32 GB. NVFP4 is a Blackwell (sm_120) format: great on a
+#                5090, NOT usable on a 4090 — see minimax-h3-ada for that.
+#   VAEs         unquantised on purpose: small, and they run once per
+#                generation rather than once per step.
+#
+# Even so the full stack is ~34 GB, i.e. slightly over 32 GB, so ComfyUI will
+# offload between the text encoder and the diffusion model. That is normal and
+# handled automatically; expect a pause when the prompt is first encoded.
+#
+# Needs a ComfyUI build with the MiniMaxH3 nodes (day-0 support, Aug 2026).
+#
+# The diffusion, text-encoder and video-VAE URLs below are confirmed working
+# against the upstream repo. The audio VAE is marked optional because its
+# exact filename is not confirmed: if it 404s the rest of the preset still
+# installs and only audio output is affected.
+# Format: folder|filename|url[|sha256]
+# size: ~38 GB
+diffusion_models|minimax_h3_fl2va_pruned_fp8_scaled.safetensors|https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/main/diffusion_models/minimax_h3_fl2va_pruned_fp8_scaled.safetensors
+text_encoders|qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors|https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/main/text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors
+vae|minimax_h3_video_vae_fp16.safetensors|https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/main/vae/minimax_h3_video_vae_fp16.safetensors
+optional:vae|minimax_h3_audio_vae_fp32.safetensors|https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/main/vae/minimax_h3_audio_vae_fp32.safetensors

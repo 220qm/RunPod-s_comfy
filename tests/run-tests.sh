@@ -287,7 +287,8 @@ if suite "download: presets, skip-existing, and hash verification"; then
     # shellcheck disable=SC1091
     out="$(bash "$REPO/scripts/download-models.sh" list 2>&1)"
     assert_contains "lists the krea2 preset" "krea2" "$out"
-    assert_contains "lists Wan 14B i2v models" "wan2.2_i2v_high_noise_14B_fp8_scaled" "$out"
+    assert_contains "lists the MiniMax H3 video model" "minimax_h3_fl2va_pruned_fp8_scaled" "$out"
+    assert_not_contains "no Wan models remain" "wan2.2" "$out"
     m="$WORKSPACE/ComfyUI/models"
     mkdir -p "$m/diffusion_models" "$m/text_encoders" "$m/vae"
     echo fake > "$m/diffusion_models/krea2_turbo_fp8_scaled.safetensors"
@@ -602,6 +603,37 @@ if suite "start: node dependencies install in a single resolver pass"; then
     assert_contains "third file in the same call" "C/requirements.txt" "$out"
     assert_eq "exactly one pkg_install invocation for three nodes" "1" \
         "$(printf '%s' "$out" | grep -c '^CALL')"
+    cleanup_env
+fi
+
+
+###############################################################################
+if suite "download: an optional entry may 404 without failing the preset"; then
+    new_env
+    mkdir -p "$WORKSPACE/presets"
+    cat > "$WORKSPACE/presets/opt.txt" <<'MANIFEST'
+# size: ~0 GB
+vae|present.safetensors|https://example.invalid/present.safetensors
+optional:vae|maybe.safetensors|https://example.invalid/maybe.safetensors
+MANIFEST
+    # aria2c that always fails, so both entries hit the failure path
+    printf '#!/bin/sh\nexit 1\n' > "$BINS/aria2c"; chmod +x "$BINS/aria2c"
+    out="$(PRESET_DIR="$WORKSPACE/presets" bash "$REPO/scripts/download-models.sh" preset opt 2>&1)"; rc=$?
+    assert_rc "a required failure still fails the preset" 1 "$rc"
+    assert_contains "required file reported as FAILED" "FAILED: vae/present.safetensors" "$out"
+    assert_contains "optional file downgraded to a warning" "optional file not available" "$out"
+    assert_not_contains "optional file not counted as FAILED" "FAILED: vae/maybe.safetensors" "$out"
+
+    # now only the optional one is missing -> preset must succeed
+    cat > "$WORKSPACE/presets/opt.txt" <<'MANIFEST'
+optional:vae|maybe.safetensors|https://example.invalid/maybe.safetensors
+MANIFEST
+    PRESET_DIR="$WORKSPACE/presets" bash "$REPO/scripts/download-models.sh" preset opt >/dev/null 2>&1
+    assert_rc "a preset of only-optional misses succeeds" 0 $?
+
+    out="$(PRESET_DIR="$WORKSPACE/presets" bash "$REPO/scripts/download-models.sh" verify opt 2>&1)"; rc=$?
+    assert_rc "verify does not fail on a missing optional file" 0 "$rc"
+    assert_contains "verify labels it OPTIONAL" "OPTIONAL" "$out"
     cleanup_env
 fi
 

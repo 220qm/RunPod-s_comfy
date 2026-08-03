@@ -1,7 +1,0 @@
-# Wan 2.2 TI2V 5B — the small hybrid text+image-to-video model. Much faster,
-# lower quality than the 14B pair; handy for drafts and quick iteration.
-# Workflow: ComfyUI menu -> Templates -> "Wan 2.2 5B".
-# size: ~18 GB
-diffusion_models|wan2.2_ti2v_5B_fp16.safetensors|https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files/diffusion_models/wan2.2_ti2v_5B_fp16.safetensors
-text_encoders|umt5_xxl_fp8_e4m3fn_scaled.safetensors|https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors
-vae|wan2.2_vae.safetensors|https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files/vae/wan2.2_vae.safetensors
