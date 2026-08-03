@@ -17,8 +17,9 @@ export RUN_DIR="$STATE_DIR/run"
 export CACHE_DIR="$STATE_DIR/cache"
 export SNAPSHOT_DIR="$STATE_DIR/snapshots"
 export TMP_DIR="$STATE_DIR/tmp"
-export COMFY_DIR="${COMFY_DIR:-$WORKSPACE/ComfyUI}"
-export MODELS_DIR="$COMFY_DIR/models"
+# Where ComfyUI's *data* lives — always the network volume.
+export COMFY_DATA_DIR="${COMFY_DATA_DIR:-$WORKSPACE/ComfyUI}"
+export MODELS_DIR="$COMFY_DATA_DIR/models"
 export SECRETS_FILE="$STATE_DIR/secrets.env"
 export CONSTRAINTS_FILE="$STATE_DIR/constraints.txt"
 export LOCK_FILE="$STATE_DIR/requirements.lock"
@@ -96,6 +97,40 @@ if [ "$VENV_LOCATION" = "volume" ]; then
 else
     export VENV_DIR="/opt/comfypod-venv"
 fi
+
+# ---------------------------------------------------------------------------
+# Where ComfyUI's *code* runs from. This is the single biggest determinant of
+# how responsive the pod feels.
+#
+# Importing ComfyUI plus its custom nodes touches thousands of small files. A
+# network volume has high per-operation latency, so running the code from
+# there makes every restart and every node install crawl — the same reason the
+# venv is not kept on the volume. Code therefore runs from container disk
+# (where the image already put it) and only the data directories are symlinked
+# to the volume.
+#   container : fast local disk, code from the image  (default when baked)
+#   volume    : everything on /workspace              (stock-image fallback)
+export COMFY_CODE_LOCATION="${COMFY_CODE_LOCATION:-auto}"
+if [ "$COMFY_CODE_LOCATION" = "auto" ]; then
+    # Container disk whenever the image supplied a copy of ComfyUI there.
+    if [ -d "${COMFY_DIR:-/opt/ComfyUI}" ]; then
+        COMFY_CODE_LOCATION=container
+    else
+        COMFY_CODE_LOCATION=volume
+    fi
+fi
+# An explicitly supplied COMFY_DIR always wins; otherwise container mode means
+# the image's copy. Falling back to volume mode only when neither exists keeps
+# the stock-image path working.
+if [ "$COMFY_CODE_LOCATION" = "container" ] && { [ -n "${COMFY_DIR:-}" ] || [ -d /opt/ComfyUI ]; }; then
+    export COMFY_DIR="${COMFY_DIR:-/opt/ComfyUI}"
+else
+    export COMFY_CODE_LOCATION=volume
+    export COMFY_DIR="${COMFY_DIR:-$COMFY_DATA_DIR}"
+fi
+# Directories that must survive the pod: kept on the volume and symlinked into
+# the code tree when the code lives on container disk.
+export COMFY_DATA_SUBDIRS="models output input user"
 export PY="$VENV_DIR/bin/python"
 export PIP="$VENV_DIR/bin/pip"
 
@@ -275,6 +310,17 @@ shell_quote() {
     printf "'%s'" "${v//\'/\'\\\'\'}"
 }
 
+# chmod does not always stick on RunPod's network volume (its filesystem can
+# ignore mode bits), which left secrets world-readable. Try the volume first,
+# and when the mode refuses to change keep the authoritative copy on container
+# disk, where it does.
+SECURE_FALLBACK_DIR="${SECURE_FALLBACK_DIR:-/opt/comfypod-private}"
+secure_file() {
+    local f="$1"
+    chmod 600 "$f" 2>/dev/null
+    [ "$(stat -c %a "$f" 2>/dev/null)" = "600" ]
+}
+
 secrets_put() {
     local key="$1" val="$2" tmp
     umask 077
@@ -283,8 +329,18 @@ secrets_put() {
     grep -v "^$key=" "$SECRETS_FILE" > "$tmp" 2>/dev/null || : > "$tmp"
     printf '%s=%s\n' "$key" "$(shell_quote "$val")" >> "$tmp"
     mv "$tmp" "$SECRETS_FILE"
-    chmod 600 "$SECRETS_FILE"
+    secure_file "$SECRETS_FILE" || true
     umask 022
+}
+
+# True when the filesystem holding $1 honours chmod at all.
+fs_honours_chmod() {
+    local probe="$1/.comfypod-perm-probe.$$" ok=1
+    ( umask 077; : > "$probe" ) 2>/dev/null || return 1
+    chmod 600 "$probe" 2>/dev/null
+    [ "$(stat -c %a "$probe" 2>/dev/null)" = "600" ] && ok=0
+    rm -f "$probe"
+    return "$ok"
 }
 
 # ComfyUI-Manager's config path moved in newer ComfyUI. Manager picks it based

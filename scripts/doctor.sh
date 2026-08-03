@@ -69,9 +69,21 @@ else
     bad "ComfyUI not installed at $COMFY_DIR"
 fi
 
+ok "ComfyUI code: $COMFY_DIR ($COMFY_CODE_LOCATION), data: $COMFY_DATA_DIR"
+if [ "$COMFY_CODE_LOCATION" = "volume" ] && [ -d /opt/ComfyUI ]; then
+    wrn "running code from the network volume — restarts and node installs will be slow;"
+    wrn "  unset COMFY_CODE_LOCATION (or set it to 'container') to use the image's copy"
+fi
+
 for svc in comfyui filebrowser jupyter idle-guard; do
-    if service_running "$svc"; then ok "service running: $svc"
-    else wrn "service not running: $svc (log: $LOG_DIR/$svc.log)"
+    if service_running "$svc"; then
+        ok "service running: $svc"
+    elif [ "$svc" = "jupyter" ] && ! port_free "$JUPYTER_PORT"; then
+        # The base image ships its own JupyterLab; ComfyPod deliberately does
+        # not start a second one on an occupied port.
+        ok "jupyter: port $JUPYTER_PORT already served (base image's own instance)"
+    else
+        wrn "service not running: $svc (log: $LOG_DIR/$svc.log)"
     fi
 done
 
@@ -128,10 +140,19 @@ if [ -d "$COMFY_DIR/custom_nodes/ComfyUI-Manager" ]; then
 fi
 
 # --- secrets hygiene -------------------------------------------------------
+chmod_works=0; fs_honours_chmod "$STATE_DIR" && chmod_works=1
 for f in "$SECRETS_FILE" "$STATE_DIR/credentials.txt"; do
     if [ -f "$f" ]; then
         perms="$(stat -c %a "$f")"
-        [ "$perms" = "600" ] && ok "$(basename "$f") is 0600" || bad "$(basename "$f") is $perms — chmod 600 it"
+        if [ "$perms" = "600" ]; then
+            ok "$(basename "$f") is 0600"
+        elif [ "$chmod_works" -eq 0 ]; then
+            # Not actionable: the volume's filesystem discards mode bits, so no
+            # amount of chmod will change this. Report it honestly as a caveat.
+            wrn "$(basename "$f") is $perms — this volume's filesystem ignores chmod"
+        else
+            bad "$(basename "$f") is $perms — chmod 600 it"
+        fi
     fi
 done
 [ -n "$HF_TOKEN" ]      && ok "HF token configured"      || wrn "no HF token (gated models will 401): comfypod-secrets set-hf-token"

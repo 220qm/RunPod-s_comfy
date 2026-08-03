@@ -58,7 +58,8 @@ new_env() {
           STATE_DIR REPO_DIR BIN_DIR LOG_DIR MARKER_DIR RUN_DIR CACHE_DIR \
           SNAPSHOT_DIR TMP_DIR COMFY_DIR MODELS_DIR SECRETS_FILE \
           CONSTRAINTS_FILE LOCK_FILE NODES_LOCK VENV_DIR PY PIP \
-          PIP_CONSTRAINT HF_HOME UV_CACHE_DIR 2>/dev/null || true
+          PIP_CONSTRAINT HF_HOME UV_CACHE_DIR \
+          COMFY_DATA_DIR COMFY_CODE_LOCATION COMFY_DATA_SUBDIRS 2>/dev/null || true
     export WORKSPACE="$WS/ws"
     export PATH="$BINS:$PATH"
 }
@@ -528,6 +529,80 @@ if suite "config: manifests and node list are well-formed"; then
     for required in ComfyUI-Manager ComfyUI-Login ComfyUI-Model-Manager; do
         assert_contains "$required is installed by default" "$required" "$(cat "$REPO/config/nodes.txt")"
     done
+fi
+
+
+###############################################################################
+if suite "layout: code runs from container disk, data stays on the volume"; then
+    new_env
+    mkdir -p "$WS/opt/ComfyUI/models" "$WS/opt/ComfyUI/custom_nodes"
+    echo "shipped" > "$WS/opt/ComfyUI/models/from_image.txt"
+    # shellcheck disable=SC1091
+    export COMFY_DIR="$WS/opt/ComfyUI" COMFY_CODE_LOCATION=container
+    source "$REPO/scripts/lib.sh"
+    ensure_dirs
+    eval "$(awk '/^link_comfy_data\(\)/,/^}$/' "$REPO/scripts/start.sh")"
+    link_comfy_data > /dev/null
+    for d in models output input user; do
+        [ -L "$COMFY_DIR/$d" ] && ok "$d is a symlink into the volume" \
+            || bad "$d is a symlink into the volume" "not a link"
+    done
+    assert_eq "symlink resolves to the volume" "$COMFY_DATA_DIR/models" \
+        "$(readlink "$COMFY_DIR/models")"
+    assert_eq "files shipped in the image were merged onto the volume" "shipped" \
+        "$(cat "$COMFY_DATA_DIR/models/from_image.txt" 2>/dev/null)"
+    echo weights > "$COMFY_DATA_DIR/models/downloaded.safetensors"
+    assert_eq "downloads land where ComfyUI reads them" "weights" \
+        "$(cat "$COMFY_DIR/models/downloaded.safetensors" 2>/dev/null)"
+    assert_eq "MODELS_DIR points at the volume" "$COMFY_DATA_DIR/models" "$MODELS_DIR"
+    link_comfy_data > /dev/null   # idempotent
+    assert_eq "re-running does not nest links" "$COMFY_DATA_DIR/models" \
+        "$(readlink "$COMFY_DIR/models")"
+    cleanup_env
+fi
+
+###############################################################################
+if suite "layout: Manager-installed nodes are recorded so they survive the pod"; then
+    new_env
+    mkdir -p "$WS/opt/ComfyUI/custom_nodes"
+    # shellcheck disable=SC1091
+    export COMFY_DIR="$WS/opt/ComfyUI" COMFY_CODE_LOCATION=container
+    source "$REPO/scripts/lib.sh"
+    ensure_dirs
+    for n in ComfyUI-Manager UserAddedNode; do
+        d="$COMFY_DIR/custom_nodes/$n"; mkdir -p "$d"
+        ( cd "$d" && git init -q . && git config user.email t@t && git config user.name t \
+          && echo x > f && git add -A && git commit -qm i \
+          && git remote add origin "https://github.com/example/$n" ) >/dev/null 2>&1
+    done
+    export SCRIPT_DIR="$REPO/scripts"
+    eval "$(awk '/^capture_manager_installed_nodes\(\)/,/^}$/' "$REPO/scripts/start.sh")"
+    capture_manager_installed_nodes > /dev/null
+    rec="$(cat "$STATE_DIR/extra-nodes.txt" 2>/dev/null)"
+    assert_contains "a user-installed node is recorded" "example/UserAddedNode" "$rec"
+    capture_manager_installed_nodes > /dev/null
+    assert_eq "recording is idempotent" "1" \
+        "$(grep -c 'UserAddedNode' "$STATE_DIR/extra-nodes.txt")"
+    cleanup_env
+fi
+
+###############################################################################
+if suite "start: node dependencies install in a single resolver pass"; then
+    new_env
+    # shellcheck disable=SC1091
+    source "$REPO/scripts/lib.sh"; ensure_dirs
+    mkdir -p "$COMFY_DIR/custom_nodes"/{A,B,C}
+    for n in A B C; do echo "pkg$n" > "$COMFY_DIR/custom_nodes/$n/requirements.txt"; done
+    calls=0
+    pkg_install() { calls=$((calls+1)); echo "CALL $*"; }
+    eval "$(awk '/^heal_node_deps\(\)/,/^}$/' "$REPO/scripts/start.sh")"
+    out="$(heal_node_deps 2>&1)"
+    assert_contains "all three requirement files in one call" "A/requirements.txt" "$out"
+    assert_contains "second file in the same call" "B/requirements.txt" "$out"
+    assert_contains "third file in the same call" "C/requirements.txt" "$out"
+    assert_eq "exactly one pkg_install invocation for three nodes" "1" \
+        "$(printf '%s' "$out" | grep -c '^CALL')"
+    cleanup_env
 fi
 
 ###############################################################################
