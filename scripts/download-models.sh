@@ -13,6 +13,9 @@
 # skipped when the file already exists.
 #
 # Manifest line format: folder|filename|url[|sha256]
+# Prefix the folder with "optional:" for a file whose absence is acceptable
+# (a companion asset, or one whose exact name upstream is not confirmed): it
+# is fetched like any other, but a failure is a warning instead of an error.
 
 export SCRIPT_NAME=download
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
@@ -21,8 +24,11 @@ source "$SCRIPT_DIR/lib.sh"
 set -uo pipefail
 ensure_dirs
 
-PRESET_DIR="$REPO_DIR/config/presets"
-[ -d "$PRESET_DIR" ] || PRESET_DIR="$SCRIPT_DIR/../config/presets"
+# Overridable so you can keep your own manifests outside the repo.
+if [ -z "${PRESET_DIR:-}" ]; then
+    PRESET_DIR="$REPO_DIR/config/presets"
+    [ -d "$PRESET_DIR" ] || PRESET_DIR="$SCRIPT_DIR/../config/presets"
+fi
 FAILED=0
 
 token_for_url() {
@@ -34,7 +40,10 @@ token_for_url() {
 
 # dl_file <folder-relative-to-models> <filename> <url> [sha256]
 dl_file() {
-    local folder="$1" filename="$2" url="$3" sha="${4:-}"
+    local folder="$1" filename="$2" url="$3" sha="${4:-}" optional=0
+    case "$folder" in
+        optional:*) optional=1; folder="${folder#optional:}" ;;
+    esac
     local dest_dir="$MODELS_DIR/$folder" dest="$MODELS_DIR/$folder/$filename"
     mkdir -p "$dest_dir"
 
@@ -60,6 +69,10 @@ dl_file() {
               -i "$input"; then
         rm -f "$input"
         log "done: $folder/$filename"
+    elif [ "$optional" -eq 1 ]; then
+        rm -f "$input"
+        warn "optional file not available, continuing without it: $folder/$filename"
+        return 0
     else
         rm -f "$input"
         warn "FAILED: $folder/$filename"
@@ -139,9 +152,17 @@ cmd_verify() {
         while IFS= read -r line; do
             case "$line" in ''|'#'*) continue ;; esac
             IFS='|' read -r folder filename url sha <<< "$line"
+            local optional=0
+            case "$folder" in
+                optional:*) optional=1; folder="${folder#optional:}" ;;
+            esac
             local dest="$MODELS_DIR/$folder/$filename"
             if [ ! -s "$dest" ]; then
-                echo "MISSING     $folder/$filename"
+                if [ "$optional" -eq 1 ]; then
+                    echo "OPTIONAL    $folder/$filename (not present; not required)"
+                else
+                    echo "MISSING     $folder/$filename"
+                fi
                 continue
             fi
             if [ -f "$dest.aria2" ]; then

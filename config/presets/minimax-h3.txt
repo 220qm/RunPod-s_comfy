@@ -22,9 +22,14 @@
 # handled automatically; expect a pause when the prompt is first encoded.
 #
 # Needs a ComfyUI build with the MiniMaxH3 nodes (day-0 support, Aug 2026).
+#
+# The diffusion, text-encoder and video-VAE URLs below are confirmed working
+# against the upstream repo. The audio VAE is marked optional because its
+# exact filename is not confirmed: if it 404s the rest of the preset still
+# installs and only audio output is affected.
 # Format: folder|filename|url[|sha256]
 # size: ~38 GB
 diffusion_models|minimax_h3_fl2va_pruned_fp8_scaled.safetensors|https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/main/diffusion_models/minimax_h3_fl2va_pruned_fp8_scaled.safetensors
 text_encoders|qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors|https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/main/text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors
 vae|minimax_h3_video_vae_fp16.safetensors|https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/main/vae/minimax_h3_video_vae_fp16.safetensors
-vae|minimax_h3_audio_vae_fp32.safetensors|https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/main/vae/minimax_h3_audio_vae_fp32.safetensors
+optional:vae|minimax_h3_audio_vae_fp32.safetensors|https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/main/vae/minimax_h3_audio_vae_fp32.safetensors

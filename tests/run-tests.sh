@@ -606,6 +606,37 @@ if suite "start: node dependencies install in a single resolver pass"; then
     cleanup_env
 fi
 
+
+###############################################################################
+if suite "download: an optional entry may 404 without failing the preset"; then
+    new_env
+    mkdir -p "$WORKSPACE/presets"
+    cat > "$WORKSPACE/presets/opt.txt" <<'MANIFEST'
+# size: ~0 GB
+vae|present.safetensors|https://example.invalid/present.safetensors
+optional:vae|maybe.safetensors|https://example.invalid/maybe.safetensors
+MANIFEST
+    # aria2c that always fails, so both entries hit the failure path
+    printf '#!/bin/sh\nexit 1\n' > "$BINS/aria2c"; chmod +x "$BINS/aria2c"
+    out="$(PRESET_DIR="$WORKSPACE/presets" bash "$REPO/scripts/download-models.sh" preset opt 2>&1)"; rc=$?
+    assert_rc "a required failure still fails the preset" 1 "$rc"
+    assert_contains "required file reported as FAILED" "FAILED: vae/present.safetensors" "$out"
+    assert_contains "optional file downgraded to a warning" "optional file not available" "$out"
+    assert_not_contains "optional file not counted as FAILED" "FAILED: vae/maybe.safetensors" "$out"
+
+    # now only the optional one is missing -> preset must succeed
+    cat > "$WORKSPACE/presets/opt.txt" <<'MANIFEST'
+optional:vae|maybe.safetensors|https://example.invalid/maybe.safetensors
+MANIFEST
+    PRESET_DIR="$WORKSPACE/presets" bash "$REPO/scripts/download-models.sh" preset opt >/dev/null 2>&1
+    assert_rc "a preset of only-optional misses succeeds" 0 $?
+
+    out="$(PRESET_DIR="$WORKSPACE/presets" bash "$REPO/scripts/download-models.sh" verify opt 2>&1)"; rc=$?
+    assert_rc "verify does not fail on a missing optional file" 0 "$rc"
+    assert_contains "verify labels it OPTIONAL" "OPTIONAL" "$out"
+    cleanup_env
+fi
+
 ###############################################################################
 printf '\n%s────────────────────────────────────────%s\n' "$DIM" "$OFF"
 printf ' %s%d passed%s, %s%d failed%s\n' "$GREEN" "$PASS" "$OFF" \
