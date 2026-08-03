@@ -16,7 +16,7 @@ https://github.com/liusida/ComfyUI-Login
 https://github.com/hayden-fr/ComfyUI-Model-Manager
 
 # Kijai's utility nodes — includes "Patch Sage Attention" (the safe,
-# per-workflow way to use SageAttention on Wan/Qwen models)
+# per-workflow way to use SageAttention on Qwen-family models)
 https://github.com/kijai/ComfyUI-KJNodes
 
 # Video encode/decode/combine — required by nearly every video workflow
@@ -37,8 +37,7 @@ https://github.com/city96/ComfyUI-GGUF
 # --- Optional (uncomment or add via EXTRA_NODES) ---------------------------
 # RIFE frame interpolation — smooth/extend generated videos
 #https://github.com/Fannovel16/ComfyUI-Frame-Interpolation
-# Kijai's Wan wrapper — powerful, but its workflows are a parallel universe
-# to the native Wan nodes; pull it in only when a workflow needs it
+# Kijai's Wan wrapper — only needed if you also run Wan models
 #https://github.com/kijai/ComfyUI-WanVideoWrapper
 # Compact utilities (resize, sharpen, simple math)
 #https://github.com/cubiq/ComfyUI_essentials

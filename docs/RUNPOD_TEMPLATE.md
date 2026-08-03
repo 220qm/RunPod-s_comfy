@@ -74,7 +74,7 @@ RunPod Console → **Templates** → *New Template*:
 | `WEB_PASSWORD` | `{{ RUNPOD_SECRET_WEB_PASSWORD }}` |
 | `HF_TOKEN` | `{{ RUNPOD_SECRET_HF_TOKEN }}` |
 | `CIVITAI_TOKEN` | `{{ RUNPOD_SECRET_CIVITAI_TOKEN }}` |
-| `DOWNLOAD_PRESETS` | `krea2,wan22-5b,wan22-t2v,wan22-i2v,upscale` (optional, this is the default) |
+| `DOWNLOAD_PRESETS` | `krea2,minimax-h3,upscale` (optional, this is the default) |
 
 Any variable from `.env.example` can be added the same way (e.g.
 `IDLE_TIMEOUT_MINUTES`, `ADMIN_LOCAL_ONLY`).
@@ -130,8 +130,8 @@ image (first boot then installs torch etc., ~10 min slower):
 
 | GPU | VRAM | Fit |
 |---|---|---|
-| RTX 5090 | 32 GB | Best choice. Blackwell (sm_120) needs CUDA 12.8 builds — baked in (torch cu128, pinned and guarded). Krea 2 fp8 and Wan 2.2 fp8 run fully in VRAM. |
-| RTX 4090 | 24 GB | Excellent. Wan 2.2 14B fp8 leans on ComfyUI's automatic offloading for the dual experts — pick a pod with ≥ 60 GB system RAM. |
+| RTX 5090 | 32 GB | Best choice. Blackwell (sm_120) needs CUDA 12.8 builds — baked in (torch cu128, pinned and guarded). Krea 2 fp8 runs fully in VRAM; MiniMax H3 offloads between its 32B text encoder and the diffusion model, which is expected. |
+| RTX 4090 | 24 GB | Good for Krea 2. For MiniMax H3 use the `minimax-h3-ada` preset — NVFP4 is Blackwell-only — and pick a pod with ≥ 64 GB system RAM, since the int8 text encoder streams from RAM. |
 | RTX PRO 4500 | 32 GB (Blackwell) | Same sm_120 handling as the 5090; less raw compute, cheaper, works fine. |
 
 ## Large uploads

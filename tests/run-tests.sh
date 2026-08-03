@@ -287,7 +287,8 @@ if suite "download: presets, skip-existing, and hash verification"; then
     # shellcheck disable=SC1091
     out="$(bash "$REPO/scripts/download-models.sh" list 2>&1)"
     assert_contains "lists the krea2 preset" "krea2" "$out"
-    assert_contains "lists Wan 14B i2v models" "wan2.2_i2v_high_noise_14B_fp8_scaled" "$out"
+    assert_contains "lists the MiniMax H3 video model" "minimax_h3_fl2va_pruned_fp8_scaled" "$out"
+    assert_not_contains "no Wan models remain" "wan2.2" "$out"
     m="$WORKSPACE/ComfyUI/models"
     mkdir -p "$m/diffusion_models" "$m/text_encoders" "$m/vae"
     echo fake > "$m/diffusion_models/krea2_turbo_fp8_scaled.safetensors"
