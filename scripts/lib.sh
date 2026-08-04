@@ -77,13 +77,21 @@ export IDLE_TIMEOUT_MINUTES="${IDLE_TIMEOUT_MINUTES:-30}"
 #            uv (fast imports; network volumes are slow at many small reads).
 # volume:    venv persisted on /workspace (no rebuild, slower imports).
 export VENV_LOCATION="${VENV_LOCATION:-container}"
-# Newest mutually consistent torch triple: torchaudio caps at 2.11.0, so
-# 2.11.0 / 0.26.0 / 2.11.0 is the latest set where all three align (it is also
-# what the community Blackwell SageAttention 2.x wheels target). cu128 rather
-# than the newer cu130 default: CUDA 13 wheels need a much newer NVIDIA driver
-# than parts of RunPod's fleet carry, and 12.8 already covers Blackwell sm_120.
+# torch/torchvision/torchaudio all from the same release: torchaudio stops at
+# 2.11.0, so 2.11.0 / 0.26.0 / 2.11.0 is the newest fully aligned set. The
+# baked image climbs higher (2.13.0 first, see docker/install-torch.sh) because
+# it can *verify* each combination before accepting it; this path installs
+# blind on a live pod, so it stays on the set that cannot mismatch.
 export TORCH_SPEC="${TORCH_SPEC:-torch==2.11.0 torchvision==0.26.0 torchaudio==2.11.0}"
-export TORCH_INDEX="${TORCH_INDEX:-https://download.pytorch.org/whl/cu128}"
+# CUDA 13 by default: ComfyUI's NVFP4/INT8 acceleration only exists on a cu130
+# build (on cu128 those paths are emulated and slower than fp8), and the
+# default MiniMax H3 preset uses an NVFP4 text encoder. Needs driver >= 580;
+# hosts below that fall back to the cu128 index automatically.
+export TORCH_INDEX="${TORCH_INDEX:-https://download.pytorch.org/whl/cu130}"
+export TORCH_FALLBACK_INDEX="${TORCH_FALLBACK_INDEX:-https://download.pytorch.org/whl/cu128}"
+# Minimum NVIDIA driver for each CUDA major, used by preflight and doctor.
+export CUDA13_MIN_DRIVER=580
+export CUDA12_MIN_DRIVER=525
 # The image build's candidate chain lives in docker/install-torch.sh
 # (TORCH_CANDIDATES); TORCH_SPEC above is what a non-baked pod installs.
 
@@ -293,6 +301,28 @@ sys.exit(f"torch lacks kernels for sm_{major}{minor} (has: {', '.join(archs)})")
 PY
 }
 
+# Is the host's NVIDIA driver new enough for the CUDA build we installed?
+# Prints a verdict; returns 1 when the driver is too old. A cu130 build on a
+# pre-580 driver fails at the first CUDA call rather than at import, so this
+# has to be checked explicitly.
+driver_check() {
+    local drv cu_major need
+    drv="$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -1)"
+    [ -n "$drv" ] || { echo "no NVIDIA driver visible"; return 0; }
+    cu_major="$("$PY" -c 'import torch; print((torch.version.cuda or "0.0").split(".")[0])' 2>/dev/null)"
+    [ -n "$cu_major" ] || { echo "driver $drv (torch CUDA version unknown)"; return 0; }
+    case "$cu_major" in
+        13) need="$CUDA13_MIN_DRIVER" ;;
+        12) need="$CUDA12_MIN_DRIVER" ;;
+        *)  echo "driver $drv / CUDA $cu_major"; return 0 ;;
+    esac
+    if [ "${drv%%.*}" -lt "$need" ] 2>/dev/null; then
+        echo "driver $drv is too old for this CUDA $cu_major build (needs >= $need)"
+        return 1
+    fi
+    echo "driver $drv supports the installed CUDA $cu_major build"
+}
+
 torch_report() {
     # No backslashes inside the f-string expression: they are a syntax error on
     # Python < 3.12, which silently made this print nothing at all.
@@ -350,6 +380,13 @@ fs_honours_chmod() {
 # matter what the config says (the usual cause of a dead install button).
 comfy_has_system_user_api() {
     grep -q "def get_system_user_directory" "$COMFY_DIR/folder_paths.py" 2>/dev/null
+}
+
+# MiniMax H3 (the default model preset) landed in ComfyUI v0.30.0. On anything
+# older the weights download fine and then fail to load, which looks like a bad
+# download rather than an out-of-date ComfyUI.
+comfy_supports_minimax() {
+    grep -q "class MiniMaxH3" "$COMFY_DIR/comfy/supported_models.py" 2>/dev/null
 }
 
 manager_config_path() {

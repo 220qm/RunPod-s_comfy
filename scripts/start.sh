@@ -91,7 +91,22 @@ preflight() {
         warn "############################################################"
     fi
     if command -v nvidia-smi > /dev/null; then
-        log "GPU: $(nvidia-smi --query-gpu=name,memory.total --format=csv,noheader 2>/dev/null | head -1)"
+        log "GPU: $(nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader 2>/dev/null | head -1)"
+        # A CUDA 13 build on a pre-580 driver imports fine and then dies at the
+        # first CUDA call, so say it here rather than letting a workflow fail.
+        if [ -x "$PY" ]; then
+            local verdict
+            if ! verdict="$(driver_check)"; then
+                warn "############################################################"
+                warn "# $verdict"
+                warn "# Generation will fail on this host. Redeploy elsewhere, or"
+                warn "# rebuild the image with"
+                warn "#   TORCH_INDEX=https://download.pytorch.org/whl/cu128"
+                warn "############################################################"
+            else
+                log "$verdict"
+            fi
+        fi
     else
         warn "no GPU visible — services will start, generation will not work"
     fi
@@ -184,12 +199,20 @@ setup_python_env() {
         fi
     fi
     if ! torch_ok; then
-        log "installing torch (cu128) — the single biggest one-time download in this"
-        log "boot (bundles the CUDA runtime, often several GB); cached afterwards."
+        log "installing torch (${TORCH_INDEX##*/}) — the single biggest one-time download in"
+        log "this boot (bundles the CUDA runtime, often several GB); cached afterwards."
         log "Progress prints below every 20s so this never looks stuck."
         # shellcheck disable=SC2086
-        run_with_heartbeat "installing torch" -- \
-            pkg_install_loud $TORCH_SPEC --index-url "$TORCH_INDEX" || die "torch install failed"
+        if ! run_with_heartbeat "installing torch" -- \
+            pkg_install_loud $TORCH_SPEC --index-url "$TORCH_INDEX"; then
+            # A CUDA 13 index that has no wheel for this pin must not end the
+            # boot: fall back the same way the image build does.
+            warn "torch install from ${TORCH_INDEX##*/} failed — retrying on ${TORCH_FALLBACK_INDEX##*/}"
+            # shellcheck disable=SC2086
+            run_with_heartbeat "installing torch (fallback index)" -- \
+                pkg_install_loud $TORCH_SPEC --index-url "$TORCH_FALLBACK_INDEX" \
+                || die "torch install failed on both $TORCH_INDEX and $TORCH_FALLBACK_INDEX"
+        fi
     fi
     pkg_install hf_transfer "huggingface_hub[cli]" opencv-python-headless bcrypt \
         || warn "extras install failed"

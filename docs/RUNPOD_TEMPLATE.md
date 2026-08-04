@@ -104,8 +104,10 @@ Run `comfypod-doctor` in any pod terminal to health-check the whole stack.
 
 ## Fallback: no baked image
 
-The stack also runs on the stock `runpod/pytorch:2.8.0-py3.11-cuda12.8.1-cudnn-devel-ubuntu22.04`
-image (first boot then installs torch etc., ~10 min slower):
+The stack also runs on a stock RunPod image (first boot then installs torch
+etc., ~10 min slower). Pick a CUDA 13 one so the toolkit matches the torch the
+installer pulls — `runpod/pytorch:1.1.0-cu1300-torch291-ubuntu2404`. A CUDA
+12.8 image works too; set `TORCH_INDEX` to the cu128 URL so the two agree:
 
 1. Deploy a pod from the stock image with the same volume/ports/env, leaving
    the start command empty. In a pod terminal:
@@ -130,9 +132,20 @@ image (first boot then installs torch etc., ~10 min slower):
 
 | GPU | VRAM | Fit |
 |---|---|---|
-| RTX 5090 | 32 GB | Best choice. Blackwell (sm_120) needs CUDA 12.8 builds — baked in (torch cu128, pinned and guarded). Krea 2 fp8 runs fully in VRAM; MiniMax H3 offloads between its 32B text encoder and the diffusion model, which is expected. |
+| RTX 5090 | 32 GB | Best choice. Blackwell (sm_120) needs CUDA ≥ 12.8; the image ships **cu130**, which is also what turns MiniMax H3's NVFP4 weights from an emulated path into a hardware one. Krea 2 fp8 runs fully in VRAM; MiniMax H3 offloads between its 32B text encoder and the diffusion model, which is expected. |
 | RTX 4090 | 24 GB | Good for Krea 2. For MiniMax H3 use the `minimax-h3-ada` preset — NVFP4 is Blackwell-only — and pick a pod with ≥ 64 GB system RAM, since the int8 text encoder streams from RAM. |
 | RTX PRO 4500 | 32 GB (Blackwell) | Same sm_120 handling as the 5090; less raw compute, cheaper, works fine. |
+
+### Driver requirement
+
+The image is built on CUDA 13, which needs **NVIDIA driver ≥ 580** (CUDA 12.8
+needed only 525). Nearly all RunPod hosts carrying a 5090 are well past that,
+but if you land on an older one the pod tells you instead of dying at the
+first CUDA call: `preflight` prints a boxed warning at boot and
+`comfypod-doctor` reports it. The fix is to terminate and redeploy — a
+different host — or to rebuild the image with
+`--build-arg`/`TORCH_INDEX=https://download.pytorch.org/whl/cu128`, accepting
+that NVFP4 models then run on the slow emulated path.
 
 ## Large uploads
 

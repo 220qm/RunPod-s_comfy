@@ -12,6 +12,14 @@ NOTHING on a build runner even for a perfectly good +cu128 wheel. The
 compile-time arch flags are read from torch._C._cuda_getArchFlags() instead,
 which is a constant baked into the binary and needs no device.
 
+torchvision and torchaudio are checked too, because "torch works" is not the
+question ComfyUI asks. Both ship compiled extensions linked against libtorch,
+and PyTorch does not promise ABI stability across minor releases — a companion
+built for a different torch fails at *import* with an undefined symbol, which
+takes out spandrel/upscaling (torchvision) or every audio node, including
+MiniMax H3's native audio (torchaudio). Catching it here rejects the candidate
+and moves the ladder down one rung instead of shipping a broken image.
+
 Exit 0 = usable, 1 = not usable (reason on stdout).
 
 IMPORTANT — this deliberately does NOT require an exact "sm_<cc>" entry per
@@ -100,6 +108,35 @@ def compiled_archs(torch) -> list:
         return []
 
 
+def check_companions() -> bool:
+    """Do torchvision/torchaudio actually load against this torch?
+
+    "Not installed" is not a failure — a candidate spec may legitimately be
+    torch alone. "Installed but does not import" is: that is the ABI mismatch
+    this whole check exists to catch.
+    """
+    import importlib
+    import importlib.util
+
+    ok = True
+    for name in ("torchvision", "torchaudio"):
+        try:
+            spec = importlib.util.find_spec(name)
+        except Exception:  # noqa: BLE001 - a broken package can raise here too
+            spec = None
+        if spec is None:
+            print(f"  {name:<12} not installed (skipped)")
+            continue
+        try:
+            mod = importlib.import_module(name)
+        except Exception as exc:  # noqa: BLE001 - report, never traceback
+            print(f"  {name:<12} INSTALLED BUT DOES NOT IMPORT: {exc}")
+            ok = False
+            continue
+        print(f"  {name:<12} {getattr(mod, '__version__', '?')} imports cleanly")
+    return ok
+
+
 def main() -> int:
     required = sys.argv[1:] or ["sm_120", "sm_89"]
 
@@ -126,22 +163,27 @@ def main() -> int:
     # Arch coverage is enforced only when the flags are actually readable.
     # Treating "cannot read" as failure is what previously rejected every
     # legitimate wheel in CI.
-    if not archs:
-        print(f"USABLE (arch list unreadable in this environment; CUDA {cuda} accepted on its build tag)")
-        return 0
-
     ok = True
-    for target in required:
-        via = covered_by(target, archs)
-        name = GPU_NAMES.get(target, target)
-        if via:
-            print(f"  {target:<8} covered by {via:<28} -> {name}")
-        else:
-            print(f"  {target:<8} NOT COVERED — {name} would fail at its first CUDA call")
-            ok = False
+    if not archs:
+        print(f"  arch list unreadable in this environment; CUDA {cuda} accepted on its build tag")
+    else:
+        for target in required:
+            via = covered_by(target, archs)
+            name = GPU_NAMES.get(target, target)
+            if via:
+                print(f"  {target:<8} covered by {via:<28} -> {name}")
+            else:
+                print(f"  {target:<8} NOT COVERED — {name} would fail at its first CUDA call")
+                ok = False
 
-    print("USABLE: covers " + " ".join(required) if ok else "UNUSABLE: missing GPU coverage")
-    return 0 if ok else 1
+    if not check_companions():
+        print("UNUSABLE: a companion package does not load against this torch")
+        return 1
+    if not ok:
+        print("UNUSABLE: missing GPU coverage")
+        return 1
+    print("USABLE: covers " + " ".join(required))
+    return 0
 
 
 if __name__ == "__main__":

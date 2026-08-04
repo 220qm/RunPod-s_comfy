@@ -36,8 +36,8 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      # The runpod/pytorch devel base is huge; reclaim ~30 GB from the runner
-      # before pulling it, or the build dies with "no space left on device".
+      # The CUDA-devel base plus a torch install is huge; reclaim ~30 GB from
+      # the runner first, or the build dies with "no space left on device".
       - name: Free disk space
         uses: jlumbroso/free-disk-space@v1.3.1
         with:
