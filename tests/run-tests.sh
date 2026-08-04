@@ -666,13 +666,97 @@ if suite "layout: Manager-installed nodes are recorded so they survive the pod";
           && git remote add origin "https://github.com/example/$n" ) >/dev/null 2>&1
     done
     export SCRIPT_DIR="$REPO/scripts"
-    eval "$(awk '/^capture_manager_installed_nodes\(\)/,/^}$/' "$REPO/scripts/start.sh")"
     capture_manager_installed_nodes > /dev/null
     rec="$(cat "$STATE_DIR/extra-nodes.txt" 2>/dev/null)"
     assert_contains "a user-installed node is recorded" "example/UserAddedNode" "$rec"
     capture_manager_installed_nodes > /dev/null
     assert_eq "recording is idempotent" "1" \
         "$(grep -c 'UserAddedNode' "$STATE_DIR/extra-nodes.txt")"
+    cleanup_env
+fi
+
+###############################################################################
+if suite "layout: registry ('CNR') nodes have no git remote and are archived"; then
+    new_env
+    export COMFY_DIR="$WS/opt/ComfyUI" COMFY_CODE_LOCATION=container
+    mkdir -p "$COMFY_DIR/custom_nodes"
+    # shellcheck disable=SC1091
+    source "$REPO/scripts/lib.sh"
+    ensure_dirs
+    export SCRIPT_DIR="$REPO/scripts"
+
+    # Exactly what ComfyUI-Manager's default install leaves behind: an
+    # extracted zip with a .tracking file and no .git anywhere.
+    cnr="$COMFY_DIR/custom_nodes/comfyui-fancynode"
+    mkdir -p "$cnr"
+    echo "nodes.py" > "$cnr/.tracking"
+    printf 'NODE_CLASS_MAPPINGS = {}\n' > "$cnr/nodes.py"
+    printf '[project]\nname = "fancynode"\n' > "$cnr/pyproject.toml"
+    # ...and a weight file it downloaded itself, which must not be archived.
+    mkdir -p "$cnr/ckpts"; head -c 200000 /dev/zero > "$cnr/ckpts/model.pth"
+
+    capture_manager_installed_nodes > /dev/null
+    n_git="$(grep -cF fancynode "$STATE_DIR/extra-nodes.txt" 2>/dev/null)" || n_git=0
+    assert_eq "git-URL capture cannot see it (this is the bug)" "0" "$n_git"
+
+    sync_nodes_to_volume > /dev/null
+    assert_eq "but it is archived to the volume" "1" \
+        "$(find "$NODE_ARCHIVE_DIR" -name 'comfyui-fancynode.tar' | wc -l)"
+    listing="$(tar -tf "$NODE_ARCHIVE_DIR/comfyui-fancynode.tar")"
+    assert_contains "the archive carries the node's code" "nodes.py" "$listing"
+    assert_not_contains "but not its downloaded weights" "model.pth" "$listing"
+
+    # A sweep every two minutes must not rewrite an unchanged node — the
+    # sentinel survives only if the tar was left alone.
+    printf 'SENTINEL' > "$NODE_ARCHIVE_DIR/comfyui-fancynode.tar"
+    touch -d '2099-01-01' "$NODE_ARCHIVE_DIR/comfyui-fancynode.tar"
+    sync_nodes_to_volume > /dev/null
+    assert_eq "unchanged nodes are not re-archived" "SENTINEL" \
+        "$(cat "$NODE_ARCHIVE_DIR/comfyui-fancynode.tar")"
+    # A node the user updated is picked up again.
+    touch -d '2099-06-01' "$cnr/nodes.py"
+    sync_nodes_to_volume > /dev/null
+    assert_contains "a changed node is re-archived" "nodes.py" \
+        "$(tar -tf "$NODE_ARCHIVE_DIR/comfyui-fancynode.tar" 2>/dev/null)"
+
+    # New pod: fresh container disk, same volume.
+    rm -rf "$COMFY_DIR/custom_nodes"
+    mkdir -p "$COMFY_DIR/custom_nodes"
+    restore_nodes_from_volume > /dev/null
+    assert_eq "the node comes back on the next pod" "1" \
+        "$([ -f "$cnr/nodes.py" ] && echo 1 || echo 0)"
+
+    # Uninstalling it in the UI must not be undone by the archive.
+    rm -rf "$cnr"
+    sync_nodes_to_volume > /dev/null
+    assert_eq "an uninstalled node's archive is dropped" "0" \
+        "$(find "$NODE_ARCHIVE_DIR" -name 'comfyui-fancynode.tar' | wc -l)"
+
+    # ...but only once a restore has run, or a fresh pod would wipe the lot.
+    printf 'x' > "$NODE_ARCHIVE_DIR/other.tar"
+    rm -f "$(node_restore_flag)"
+    sync_nodes_to_volume > /dev/null
+    assert_eq "archives are never pruned before this boot's restore" "1" \
+        "$(find "$NODE_ARCHIVE_DIR" -name 'other.tar' | wc -l)"
+    cleanup_env
+fi
+
+###############################################################################
+if suite "layout: node-sync keeps oversized nodes out of the archive"; then
+    new_env
+    export COMFY_DIR="$WS/opt/ComfyUI" COMFY_CODE_LOCATION=container
+    mkdir -p "$COMFY_DIR/custom_nodes"
+    # shellcheck disable=SC1091
+    source "$REPO/scripts/lib.sh"
+    ensure_dirs
+    export SCRIPT_DIR="$REPO/scripts" NODE_ARCHIVE_MAX_MB=1
+    big="$COMFY_DIR/custom_nodes/huge-node"
+    mkdir -p "$big"
+    head -c 3000000 /dev/zero > "$big/blob.dat"
+    out="$(sync_nodes_to_volume 2>&1)"
+    assert_eq "an oversized node is not archived" "0" \
+        "$(find "$NODE_ARCHIVE_DIR" -name 'huge-node.tar' | wc -l)"
+    assert_contains "and the user is told why" "NODE_ARCHIVE_MAX_MB" "$out"
     cleanup_env
 fi
 

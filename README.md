@@ -160,6 +160,8 @@ Secrets (seeded to the volume on first boot):
     ├── constraints.txt       # the torch pin every installer must obey
     ├── requirements.lock     # full Python env, restored each boot via uv
     ├── nodes.lock            # exact commit of every custom node
+    ├── extra-nodes.txt       # git remotes of nodes you added, re-cloned each pod
+    ├── node-archives/        # one tar per registry-installed node (no git remote)
     ├── snapshots/            # rollback points (baseline + pre-update-*)
     ├── cache/                # uv wheel cache + HF cache
     └── logs/                 # comfyui.log, downloads.log, auth-guard.log …
@@ -187,6 +189,7 @@ the lockfile via uv (~1 min warm; `VENV_LOCATION=volume` persists it instead).
 | Node update broke the graph | `comfypod-snapshot restore baseline` (or the auto-saved `pre-update-*`) |
 | **Manager can't install/update nodes** | `comfypod-doctor` names the cause. Most often ComfyUI is too old to expose the System User Protection API, in which case Manager force-sets `security_level=strong` and blocks everything regardless of config → `comfypod-update`. Otherwise set `MANAGER_SECURITY_LEVEL=weak` and restart. Guaranteed fallback: `comfypod-node add <git-url>` |
 | A node imports fine but its Python deps are missing | `comfypod-node fix` (reinstalls requirements for every node), then restart |
+| **A node I installed is gone on a new pod** | ComfyUI's code runs from container disk (imports from the volume are far too slow), so the `node-sync` service copies UI-installed nodes to the volume every 2 min and `start.sh` puts them back. `comfypod-doctor` shows the counts and whether node-sync is running. A node bigger than `NODE_ARCHIVE_MAX_MB` (512 by default — nodes that download weights into their own folder) is skipped with a warning; raise the limit or install it via `comfypod-node add <git-url>`, which persists by URL at any size |
 | Wonky Python state | `rm -rf /opt/comfypod-venv` → next boot rebuilds from the lockfile; `rm /workspace/.comfypod/requirements.lock` too for a from-scratch resolve |
 
 ## First-run validation checklist

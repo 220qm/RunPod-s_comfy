@@ -264,30 +264,6 @@ link_comfy_data() {
     log "code on container disk ($COMFY_DIR), data on the volume ($COMFY_DATA_DIR)"
 }
 
-# Nodes the user installed through ComfyUI-Manager land in the code tree, which
-# is ephemeral when the code runs from container disk. Record their origin so
-# the next pod reinstalls them automatically.
-capture_manager_installed_nodes() {
-    [ "$COMFY_CODE_LOCATION" = "container" ] || return 0
-    local dir name url known recorded=0
-    known="$(cat "$REPO_DIR/config/nodes.txt" "$SCRIPT_DIR/../config/nodes.txt" 2>/dev/null)"
-    touch "$STATE_DIR/extra-nodes.txt"
-    for dir in "$COMFY_DIR"/custom_nodes/*/; do
-        dir="${dir%/}"
-        [ -d "$dir/.git" ] || continue
-        name="$(basename "$dir")"
-        url="$(git -C "$dir" config --get remote.origin.url 2>/dev/null)" || continue
-        [ -n "$url" ] || continue
-        case "$known" in *"$url"*) continue ;; esac                 # shipped in the image
-        grep -qF "$url" "$STATE_DIR/extra-nodes.txt" && continue     # already recorded
-        printf '%s\n' "$url" >> "$STATE_DIR/extra-nodes.txt"
-        log "recorded $name for reinstall on future pods"
-        recorded=$((recorded + 1))
-    done
-    [ "$recorded" -gt 0 ] && log "$recorded Manager-installed node(s) will persist"
-    return 0
-}
-
 setup_comfyui() {
     if [ "$COMFY_CODE_LOCATION" = "container" ]; then
         link_comfy_data
@@ -388,6 +364,10 @@ heal_node_deps() {
 
 setup_custom_nodes() {
     mkdir -p "$COMFY_DIR/custom_nodes"
+    # Before anything is installed: put back what the last pod had. Registry
+    # ("CNR") installs from the Manager UI have no git remote, so this archive
+    # is the only thing that can bring them back.
+    restore_nodes_from_volume
     local nodes_file="$REPO_DIR/config/nodes.txt" spec dir
     [ -f "$nodes_file" ] || nodes_file="$SCRIPT_DIR/../config/nodes.txt"
     # `< /dev/null` on every install: git and pip read stdin, and inside a
@@ -409,7 +389,7 @@ setup_custom_nodes() {
             install_node "$spec" < /dev/null
         done < "$STATE_DIR/extra-nodes.txt"
     fi
-    capture_manager_installed_nodes
+    persist_nodes
     run_with_heartbeat "checking custom node dependencies" -- heal_node_deps
     # Record the exact commit of every node (the rollback primitive).
     : > "$NODES_LOCK.tmp"
@@ -545,6 +525,10 @@ start_services() {
     if [ "$IDLE_TIMEOUT_MINUTES" -gt 0 ] 2>/dev/null; then
         start_service idle-guard "bash '$SCRIPT_DIR/idle-guard.sh'"
     fi
+
+    # Nodes installed from the Manager UI only exist on container disk; this
+    # copies them to the volume while the pod is alive.
+    start_service node-sync "bash '$SCRIPT_DIR/node-sync.sh'"
 }
 
 start_downloads() {

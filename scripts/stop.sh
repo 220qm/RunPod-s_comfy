@@ -6,7 +6,11 @@ SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 source "$SCRIPT_DIR/lib.sh"
 set -uo pipefail
 
-for svc in comfyui filebrowser jupyter idle-guard; do
+# Last chance to get UI-installed nodes onto the volume before everything that
+# would have done it later is killed.
+persist_nodes
+
+for svc in comfyui filebrowser jupyter idle-guard node-sync; do
     stop_service "$svc"
 done
 pkill -f "scripts/auth-guard.sh" 2>/dev/null || true

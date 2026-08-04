@@ -100,7 +100,17 @@ if [ "$COMFY_CODE_LOCATION" = "volume" ] && [ -d /opt/ComfyUI ]; then
     wrn "  unset COMFY_CODE_LOCATION (or set it to 'container') to use the image's copy"
 fi
 
-for svc in comfyui filebrowser jupyter idle-guard; do
+if [ "$COMFY_CODE_LOCATION" = "container" ]; then
+    n_arch="$(find "$NODE_ARCHIVE_DIR" -name '*.tar' 2> /dev/null | wc -l)"
+    n_git="$(grep -cvE '^\s*(#|$)' "$STATE_DIR/extra-nodes.txt" 2> /dev/null || echo 0)"
+    ok "node persistence: $n_arch archived + $n_git recorded by git URL"
+    if ! service_running node-sync; then
+        wrn "node-sync is not running — nodes installed from the Manager UI from here on"
+        wrn "  will NOT survive this pod: bash $SCRIPT_DIR/start.sh"
+    fi
+fi
+
+for svc in comfyui filebrowser jupyter idle-guard node-sync; do
     if service_running "$svc"; then
         ok "service running: $svc"
     elif [ "$svc" = "jupyter" ] && ! port_free "$JUPYTER_PORT"; then

@@ -24,6 +24,9 @@ export SECRETS_FILE="$STATE_DIR/secrets.env"
 export CONSTRAINTS_FILE="$STATE_DIR/constraints.txt"
 export LOCK_FILE="$STATE_DIR/requirements.lock"
 export NODES_LOCK="$STATE_DIR/nodes.lock"
+# One tar per custom node that git cannot bring back — see the node
+# persistence section further down.
+export NODE_ARCHIVE_DIR="${NODE_ARCHIVE_DIR:-$STATE_DIR/node-archives}"
 
 # Optional persisted defaults (legacy, ${VAR:-default} style), then the
 # canonical secrets file. secrets.env wins over template env vars so that
@@ -49,6 +52,11 @@ export DOWNLOAD_PRESETS="${DOWNLOAD_PRESETS:-krea2,minimax-h3,upscale}"
 export COMFYUI_REF="${COMFYUI_REF:-latest}"
 export COMFYUI_FLAGS="${COMFYUI_FLAGS:-}"
 export EXTRA_NODES="${EXTRA_NODES:-}"
+# Seconds between background sweeps that copy Manager-installed nodes to the
+# volume, and the size above which a node is too big to archive (nodes that
+# download their own weights into their own folder).
+export NODE_SYNC_INTERVAL="${NODE_SYNC_INTERVAL:-120}"
+export NODE_ARCHIVE_MAX_MB="${NODE_ARCHIVE_MAX_MB:-512}"
 export AUTO_UPDATE="${AUTO_UPDATE:-false}"
 export ENABLE_JUPYTER="${ENABLE_JUPYTER:-true}"
 # auto: install SageAttention for per-workflow use (KJNodes "Patch Sage
@@ -389,6 +397,134 @@ comfy_supports_minimax() {
     grep -q "class MiniMaxH3" "$COMFY_DIR/comfy/supported_models.py" 2>/dev/null
 }
 
+# ---------------------------------------------------------------------------
+# Custom node persistence
+#
+# ComfyUI's code tree lives on container disk (imports from the network volume
+# are far too slow), so anything installed from the ComfyUI-Manager UI dies
+# with the pod. Two mechanisms bring it back, because Manager has two install
+# paths and they leave completely different things on disk:
+#
+#   * "nightly" / git-URL installs are a git clone -> recorded by remote URL in
+#     extra-nodes.txt and re-cloned on the next boot.
+#   * registry ("CNR") installs — the DEFAULT button in the UI — are a zip
+#     extracted into custom_nodes/<id> with no .git and no remote at all.
+#     Nothing about them can be re-derived, so the directory itself is archived
+#     to the volume as a single tar (one big sequential write beats thousands
+#     of small files) and unpacked into the fresh container next boot.
+#
+# Both run on a timer, not just at boot: a node installed at 14:00 on a pod
+# terminated at 15:00 never sees another boot of that container.
+# ---------------------------------------------------------------------------
+
+# Weights inside a node's own folder are re-downloadable; keeping them out of
+# the archive is the difference between a 2 MB tar and a 6 GB one.
+NODE_ARCHIVE_EXCLUDES=(
+    --exclude=__pycache__ --exclude='*.pyc'
+    --exclude='*.safetensors' --exclude='*.ckpt' --exclude='*.pth'
+    --exclude='*.pt' --exclude='*.bin' --exclude='*.onnx' --exclude='*.gguf'
+)
+
+# Pruning archives is only safe once this boot's restore has run — otherwise
+# the first sweep on a fresh pod would delete every archive it is meant to
+# protect. The flag lives in TMP_DIR, which is per-boot.
+node_restore_flag() { printf '%s/nodes-restored' "$TMP_DIR"; }
+
+# Unpack archived nodes into the (fresh) container-disk code tree.
+restore_nodes_from_volume() {
+    [ "$COMFY_CODE_LOCATION" = "container" ] || return 0
+    local archive name restored=0
+    mkdir -p "$COMFY_DIR/custom_nodes"
+    for archive in "$NODE_ARCHIVE_DIR"/*.tar; do
+        [ -f "$archive" ] || continue
+        name="$(basename "$archive" .tar)"
+        [ -e "$COMFY_DIR/custom_nodes/$name" ] && continue
+        if tar -xf "$archive" -C "$COMFY_DIR/custom_nodes" 2> /dev/null; then
+            restored=$((restored + 1))
+        else
+            warn "could not restore node archive: $name"
+        fi
+    done
+    [ "$restored" -gt 0 ] && log "restored $restored node(s) installed from the Manager UI"
+    mkdir -p "$TMP_DIR" && : > "$(node_restore_flag)"
+    return 0
+}
+
+# Archive every node git cannot reproduce, and drop archives of nodes the user
+# has since uninstalled.
+sync_nodes_to_volume() {
+    [ "$COMFY_CODE_LOCATION" = "container" ] || return 0
+    [ -d "$COMFY_DIR/custom_nodes" ] || return 0
+    mkdir -p "$NODE_ARCHIVE_DIR"
+    local dir name archive size synced=0
+    for dir in "$COMFY_DIR"/custom_nodes/*/; do
+        dir="${dir%/}"
+        name="$(basename "$dir")"
+        case "$name" in __pycache__ | .disabled | *.disabled) continue ;; esac
+        # A git checkout is reproducible from its remote; extra-nodes.txt
+        # carries it for a fraction of the space.
+        [ -d "$dir/.git" ] && continue
+        archive="$NODE_ARCHIVE_DIR/$name.tar"
+        # Untouched since the last sweep? Nothing to write.
+        [ -f "$archive" ] && [ -z "$(find "$dir" -newer "$archive" -print -quit 2> /dev/null)" ] \
+            && continue
+        size="$(du -sm "${NODE_ARCHIVE_EXCLUDES[@]}" "$dir" 2> /dev/null | cut -f1)"
+        if [ "${size:-0}" -gt "$NODE_ARCHIVE_MAX_MB" ] 2> /dev/null; then
+            warn "node $name is ${size}MB — above NODE_ARCHIVE_MAX_MB, not archived;"
+            warn "  it will need reinstalling on a new pod"
+            continue
+        fi
+        if tar -cf "$archive.tmp" -C "$COMFY_DIR/custom_nodes" \
+            "${NODE_ARCHIVE_EXCLUDES[@]}" "$name" 2> /dev/null; then
+            mv -f "$archive.tmp" "$archive"
+            synced=$((synced + 1))
+        else
+            rm -f "$archive.tmp"
+            warn "could not archive node: $name"
+        fi
+    done
+    if [ -f "$(node_restore_flag)" ]; then
+        for archive in "$NODE_ARCHIVE_DIR"/*.tar; do
+            [ -f "$archive" ] || continue
+            name="$(basename "$archive" .tar)"
+            [ -d "$COMFY_DIR/custom_nodes/$name" ] && continue
+            rm -f "$archive"
+            log "dropped archive for uninstalled node: $name"
+        done
+    fi
+    [ "$synced" -gt 0 ] && log "archived $synced Manager-installed node(s) to the volume"
+    return 0
+}
+
+# Record the remote of every git-installed node that is not part of the image,
+# so the next pod re-clones it.
+capture_manager_installed_nodes() {
+    [ "$COMFY_CODE_LOCATION" = "container" ] || return 0
+    local dir name url known recorded=0
+    known="$(cat "$REPO_DIR/config/nodes.txt" "$SCRIPT_DIR/../config/nodes.txt" 2> /dev/null)"
+    mkdir -p "$STATE_DIR" && touch "$STATE_DIR/extra-nodes.txt"
+    for dir in "$COMFY_DIR"/custom_nodes/*/; do
+        dir="${dir%/}"
+        [ -d "$dir/.git" ] || continue
+        name="$(basename "$dir")"
+        url="$(git -C "$dir" config --get remote.origin.url 2> /dev/null)" || continue
+        [ -n "$url" ] || continue
+        case "$known" in *"$url"*) continue ;; esac                  # shipped in the image
+        grep -qF "$url" "$STATE_DIR/extra-nodes.txt" && continue      # already recorded
+        printf '%s\n' "$url" >> "$STATE_DIR/extra-nodes.txt"
+        log "recorded $name for reinstall on future pods"
+        recorded=$((recorded + 1))
+    done
+    [ "$recorded" -gt 0 ] && log "$recorded Manager-installed node(s) will persist"
+    return 0
+}
+
+# Everything needed to make the current node set survive this pod.
+persist_nodes() {
+    capture_manager_installed_nodes
+    sync_nodes_to_volume
+}
+
 manager_config_path() {
     if comfy_has_system_user_api; then
         printf '%s' "$COMFY_DIR/user/__manager/config.ini"
@@ -451,6 +587,7 @@ stop_service() {
         filebrowser) pkill -f "filebrowser -d $STATE_DIR" 2>/dev/null || true ;;
         jupyter)     pkill -f "jupyter-lab" 2>/dev/null || true ;;
         idle-guard)  pkill -f "scripts/idle-guard.sh" 2>/dev/null || true ;;
+        node-sync)   pkill -f "scripts/node-sync.sh" 2>/dev/null || true ;;
     esac
 }
 
