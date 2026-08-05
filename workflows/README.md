@@ -32,8 +32,33 @@ JSON file in this repo would only drift out of date.
   is a Blackwell (RTX 5090 / PRO 4500) format. On a 4090 or RTX 4500 Ada use
   `comfy-dl preset minimax-h3-ada`, which swaps in the int8 encoder.
 - **Needs a ComfyUI with the MiniMaxH3 nodes.** Support landed day-0 in
-  August 2026; if the nodes are missing, run `comfypod-update` (or rebuild the
-  image, which pins the latest release tag at build time).
+  August 2026 (ComfyUI **v0.30.0**); v0.29.x downloads the weights happily and
+  then refuses to load them. `comfypod-doctor` checks for this — the fix is
+  `comfypod-update`, or a rebuilt image, which asserts the support is present
+  at build time.
+
+### Making it fast
+
+This model is the one place where the CUDA version is worth more than any
+setting in the graph.
+
+- **The banner must say `+cu130`.** ComfyUI's log prints
+  `pytorch version: 2.13.0+cu130` at startup. On a CUDA 12 build the NVFP4 /
+  INT8 quantised paths are *emulated* — the model loads and runs, just several
+  times slower, which reads as "this model is too slow for my card" rather
+  than as a misconfiguration. Community reports put the same 5-second,
+  2-reference generation at 12–13 minutes on cu128 and ~4 minutes on cu130.
+  The ComfyPod image is built on cu130 by default; `comfypod-doctor` says so
+  either way.
+- **EasyCache.** Ships with ComfyUI (no install needed) — drop the
+  **EasyCache** node in front of the model. It skips redundant steps by
+  reusing cached residuals, and on long clips it roughly halves the time:
+  reported 21 → 11 minutes for a 15-second 480p generation, with differences
+  described as ~1% and sometimes preferred. **LazyCache** is the more
+  aggressive variant.
+- **Fewer steps, second.** Dropping to ~13 steps with EasyCache took that same
+  clip to ~8 minutes; movement holds up, but spoken audio starts losing
+  detail. Tune steps only after EasyCache, not instead of it.
 
 ## Krea 2 notes
 

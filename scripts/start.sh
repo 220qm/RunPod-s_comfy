@@ -91,7 +91,22 @@ preflight() {
         warn "############################################################"
     fi
     if command -v nvidia-smi > /dev/null; then
-        log "GPU: $(nvidia-smi --query-gpu=name,memory.total --format=csv,noheader 2>/dev/null | head -1)"
+        log "GPU: $(nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader 2>/dev/null | head -1)"
+        # A CUDA 13 build on a pre-580 driver imports fine and then dies at the
+        # first CUDA call, so say it here rather than letting a workflow fail.
+        if [ -x "$PY" ]; then
+            local verdict
+            if ! verdict="$(driver_check)"; then
+                warn "############################################################"
+                warn "# $verdict"
+                warn "# Generation will fail on this host. Redeploy elsewhere, or"
+                warn "# rebuild the image with"
+                warn "#   TORCH_INDEX=https://download.pytorch.org/whl/cu128"
+                warn "############################################################"
+            else
+                log "$verdict"
+            fi
+        fi
     else
         warn "no GPU visible — services will start, generation will not work"
     fi
@@ -184,12 +199,20 @@ setup_python_env() {
         fi
     fi
     if ! torch_ok; then
-        log "installing torch (cu128) — the single biggest one-time download in this"
-        log "boot (bundles the CUDA runtime, often several GB); cached afterwards."
+        log "installing torch (${TORCH_INDEX##*/}) — the single biggest one-time download in"
+        log "this boot (bundles the CUDA runtime, often several GB); cached afterwards."
         log "Progress prints below every 20s so this never looks stuck."
         # shellcheck disable=SC2086
-        run_with_heartbeat "installing torch" -- \
-            pkg_install_loud $TORCH_SPEC --index-url "$TORCH_INDEX" || die "torch install failed"
+        if ! run_with_heartbeat "installing torch" -- \
+            pkg_install_loud $TORCH_SPEC --index-url "$TORCH_INDEX"; then
+            # A CUDA 13 index that has no wheel for this pin must not end the
+            # boot: fall back the same way the image build does.
+            warn "torch install from ${TORCH_INDEX##*/} failed — retrying on ${TORCH_FALLBACK_INDEX##*/}"
+            # shellcheck disable=SC2086
+            run_with_heartbeat "installing torch (fallback index)" -- \
+                pkg_install_loud $TORCH_SPEC --index-url "$TORCH_FALLBACK_INDEX" \
+                || die "torch install failed on both $TORCH_INDEX and $TORCH_FALLBACK_INDEX"
+        fi
     fi
     pkg_install hf_transfer "huggingface_hub[cli]" opencv-python-headless bcrypt \
         || warn "extras install failed"
@@ -239,30 +262,6 @@ link_comfy_data() {
         [ -L "$COMFY_DIR/$d" ] || ln -s "$target" "$COMFY_DIR/$d"
     done
     log "code on container disk ($COMFY_DIR), data on the volume ($COMFY_DATA_DIR)"
-}
-
-# Nodes the user installed through ComfyUI-Manager land in the code tree, which
-# is ephemeral when the code runs from container disk. Record their origin so
-# the next pod reinstalls them automatically.
-capture_manager_installed_nodes() {
-    [ "$COMFY_CODE_LOCATION" = "container" ] || return 0
-    local dir name url known recorded=0
-    known="$(cat "$REPO_DIR/config/nodes.txt" "$SCRIPT_DIR/../config/nodes.txt" 2>/dev/null)"
-    touch "$STATE_DIR/extra-nodes.txt"
-    for dir in "$COMFY_DIR"/custom_nodes/*/; do
-        dir="${dir%/}"
-        [ -d "$dir/.git" ] || continue
-        name="$(basename "$dir")"
-        url="$(git -C "$dir" config --get remote.origin.url 2>/dev/null)" || continue
-        [ -n "$url" ] || continue
-        case "$known" in *"$url"*) continue ;; esac                 # shipped in the image
-        grep -qF "$url" "$STATE_DIR/extra-nodes.txt" && continue     # already recorded
-        printf '%s\n' "$url" >> "$STATE_DIR/extra-nodes.txt"
-        log "recorded $name for reinstall on future pods"
-        recorded=$((recorded + 1))
-    done
-    [ "$recorded" -gt 0 ] && log "$recorded Manager-installed node(s) will persist"
-    return 0
 }
 
 setup_comfyui() {
@@ -365,6 +364,10 @@ heal_node_deps() {
 
 setup_custom_nodes() {
     mkdir -p "$COMFY_DIR/custom_nodes"
+    # Before anything is installed: put back what the last pod had. Registry
+    # ("CNR") installs from the Manager UI have no git remote, so this archive
+    # is the only thing that can bring them back.
+    restore_nodes_from_volume
     local nodes_file="$REPO_DIR/config/nodes.txt" spec dir
     [ -f "$nodes_file" ] || nodes_file="$SCRIPT_DIR/../config/nodes.txt"
     # `< /dev/null` on every install: git and pip read stdin, and inside a
@@ -386,7 +389,7 @@ setup_custom_nodes() {
             install_node "$spec" < /dev/null
         done < "$STATE_DIR/extra-nodes.txt"
     fi
-    capture_manager_installed_nodes
+    persist_nodes
     run_with_heartbeat "checking custom node dependencies" -- heal_node_deps
     # Record the exact commit of every node (the rollback primitive).
     : > "$NODES_LOCK.tmp"
@@ -522,6 +525,10 @@ start_services() {
     if [ "$IDLE_TIMEOUT_MINUTES" -gt 0 ] 2>/dev/null; then
         start_service idle-guard "bash '$SCRIPT_DIR/idle-guard.sh'"
     fi
+
+    # Nodes installed from the Manager UI only exist on container disk; this
+    # copies them to the volume while the pod is alive.
+    start_service node-sync "bash '$SCRIPT_DIR/node-sync.sh'"
 }
 
 start_downloads() {

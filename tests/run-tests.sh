@@ -397,6 +397,95 @@ EOF
 fi
 
 ###############################################################################
+if suite "verify-torch: a companion that cannot load rejects the candidate"; then
+    new_env
+    d="$WS/vtc"; mkdir -p "$d"
+    good_torch() { cat > "$d/torch.py" <<'EOF'
+__version__ = "2.13.0+cu130"
+class version: cuda = "13.0"
+class _C:
+    @staticmethod
+    def _cuda_getArchFlags(): return "sm_80 sm_86 sm_90 sm_120 compute_120"
+class cuda:
+    @staticmethod
+    def is_available(): return False
+    @staticmethod
+    def get_arch_list(): return []
+EOF
+    }
+
+    good_torch
+    out="$(PYTHONPATH="$d" python3 "$REPO/docker/verify-torch.py" 2>&1)"; rc=$?
+    assert_rc "torch alone, no companions installed, is accepted" 0 "$rc"
+    assert_contains "absent companion is reported as skipped" "not installed" "$out"
+
+    # torchvision present but built against a different torch: the real failure
+    # is an undefined symbol at import time.
+    printf 'raise ImportError("undefined symbol: _ZN3c10")\n' > "$d/torchvision.py"
+    out="$(PYTHONPATH="$d" python3 "$REPO/docker/verify-torch.py" 2>&1)"; rc=$?
+    assert_rc "broken torchvision rejects the candidate" 1 "$rc"
+    assert_contains "reason names the companion" "torchvision" "$out"
+    assert_contains "reason is the import failure" "DOES NOT IMPORT" "$out"
+
+    printf '__version__ = "0.28.0"\n' > "$d/torchvision.py"
+    printf 'raise OSError("libtorch_cpu.so: undefined symbol")\n' > "$d/torchaudio.py"
+    out="$(PYTHONPATH="$d" python3 "$REPO/docker/verify-torch.py" 2>&1)"; rc=$?
+    assert_rc "broken torchaudio rejects the candidate too" 1 "$rc"
+    assert_contains "working companion still reported" "0.28.0" "$out"
+
+    printf '__version__ = "2.11.0"\n' > "$d/torchaudio.py"
+    out="$(PYTHONPATH="$d" python3 "$REPO/docker/verify-torch.py" 2>&1)"; rc=$?
+    assert_rc "a fully importable trio is accepted" 0 "$rc"
+    cleanup_env
+fi
+
+###############################################################################
+if suite "nvcc-check: the toolkit must match the CUDA major torch was built for"; then
+    new_env
+    mkdir -p "$WS/venv/bin" "$WS/cu"
+    cat > "$WS/venv/bin/python" <<EOF
+#!/bin/bash
+export PYTHONPATH="$WS/cu"
+exec "$REAL_PY3" "\$@"
+EOF
+    chmod +x "$WS/venv/bin/python"
+    mk_torch() {
+        rm -rf "$WS/cu/__pycache__"
+        if [ "$1" = none ]; then printf 'class version: cuda = None\n' > "$WS/cu/torch.py"
+        else printf "class version: cuda = '%s'\n" "$1" > "$WS/cu/torch.py"; fi
+    }
+    mk_nvcc() {
+        printf '#!/bin/bash\necho "Cuda compilation tools, release %s, V%s.0"\n' "$1" "$1" \
+            > "$BINS/nvcc"
+        chmod +x "$BINS/nvcc"
+    }
+
+    mk_torch 13.0; mk_nvcc 13.0
+    out="$(bash "$REPO/docker/nvcc-check.sh" "$WS/venv" 2>&1)"; rc=$?
+    assert_rc "nvcc 13 accepted for a cu130 torch" 0 "$rc"
+    assert_contains "verdict names both versions" "nvcc 13.0 matches torch CUDA 13.0" "$out"
+
+    mk_torch 13.0; mk_nvcc 12.8
+    out="$(bash "$REPO/docker/nvcc-check.sh" "$WS/venv" 2>&1)"; rc=$?
+    assert_rc "nvcc 12.8 rejected for a cu130 torch" 1 "$rc"
+    assert_contains "verdict explains the consequence" "refuses to build extensions" "$out"
+
+    mk_torch 12.8; mk_nvcc 12.8
+    bash "$REPO/docker/nvcc-check.sh" "$WS/venv" > /dev/null 2>&1
+    assert_rc "a matching CUDA 12 pair is fine too" 0 $?
+
+    mk_torch 13.0; rm -f "$BINS/nvcc"
+    out="$(bash "$REPO/docker/nvcc-check.sh" "$WS/venv" 2>&1)"; rc=$?
+    assert_rc "no nvcc at all is a failure" 1 "$rc"
+    assert_contains "and says why" "no nvcc" "$out"
+
+    mk_torch none; mk_nvcc 13.0
+    bash "$REPO/docker/nvcc-check.sh" "$WS/venv" > /dev/null 2>&1
+    assert_rc "a CPU-only torch cannot build extensions" 1 $?
+    cleanup_env
+fi
+
+###############################################################################
 if suite "install-torch: rejects an unusable candidate and tries the next"; then
     new_env
     mkdir -p "$WS/venv/bin" "$WS/active"
@@ -577,13 +666,97 @@ if suite "layout: Manager-installed nodes are recorded so they survive the pod";
           && git remote add origin "https://github.com/example/$n" ) >/dev/null 2>&1
     done
     export SCRIPT_DIR="$REPO/scripts"
-    eval "$(awk '/^capture_manager_installed_nodes\(\)/,/^}$/' "$REPO/scripts/start.sh")"
     capture_manager_installed_nodes > /dev/null
     rec="$(cat "$STATE_DIR/extra-nodes.txt" 2>/dev/null)"
     assert_contains "a user-installed node is recorded" "example/UserAddedNode" "$rec"
     capture_manager_installed_nodes > /dev/null
     assert_eq "recording is idempotent" "1" \
         "$(grep -c 'UserAddedNode' "$STATE_DIR/extra-nodes.txt")"
+    cleanup_env
+fi
+
+###############################################################################
+if suite "layout: registry ('CNR') nodes have no git remote and are archived"; then
+    new_env
+    export COMFY_DIR="$WS/opt/ComfyUI" COMFY_CODE_LOCATION=container
+    mkdir -p "$COMFY_DIR/custom_nodes"
+    # shellcheck disable=SC1091
+    source "$REPO/scripts/lib.sh"
+    ensure_dirs
+    export SCRIPT_DIR="$REPO/scripts"
+
+    # Exactly what ComfyUI-Manager's default install leaves behind: an
+    # extracted zip with a .tracking file and no .git anywhere.
+    cnr="$COMFY_DIR/custom_nodes/comfyui-fancynode"
+    mkdir -p "$cnr"
+    echo "nodes.py" > "$cnr/.tracking"
+    printf 'NODE_CLASS_MAPPINGS = {}\n' > "$cnr/nodes.py"
+    printf '[project]\nname = "fancynode"\n' > "$cnr/pyproject.toml"
+    # ...and a weight file it downloaded itself, which must not be archived.
+    mkdir -p "$cnr/ckpts"; head -c 200000 /dev/zero > "$cnr/ckpts/model.pth"
+
+    capture_manager_installed_nodes > /dev/null
+    n_git="$(grep -cF fancynode "$STATE_DIR/extra-nodes.txt" 2>/dev/null)" || n_git=0
+    assert_eq "git-URL capture cannot see it (this is the bug)" "0" "$n_git"
+
+    sync_nodes_to_volume > /dev/null
+    assert_eq "but it is archived to the volume" "1" \
+        "$(find "$NODE_ARCHIVE_DIR" -name 'comfyui-fancynode.tar' | wc -l)"
+    listing="$(tar -tf "$NODE_ARCHIVE_DIR/comfyui-fancynode.tar")"
+    assert_contains "the archive carries the node's code" "nodes.py" "$listing"
+    assert_not_contains "but not its downloaded weights" "model.pth" "$listing"
+
+    # A sweep every two minutes must not rewrite an unchanged node — the
+    # sentinel survives only if the tar was left alone.
+    printf 'SENTINEL' > "$NODE_ARCHIVE_DIR/comfyui-fancynode.tar"
+    touch -d '2099-01-01' "$NODE_ARCHIVE_DIR/comfyui-fancynode.tar"
+    sync_nodes_to_volume > /dev/null
+    assert_eq "unchanged nodes are not re-archived" "SENTINEL" \
+        "$(cat "$NODE_ARCHIVE_DIR/comfyui-fancynode.tar")"
+    # A node the user updated is picked up again.
+    touch -d '2099-06-01' "$cnr/nodes.py"
+    sync_nodes_to_volume > /dev/null
+    assert_contains "a changed node is re-archived" "nodes.py" \
+        "$(tar -tf "$NODE_ARCHIVE_DIR/comfyui-fancynode.tar" 2>/dev/null)"
+
+    # New pod: fresh container disk, same volume.
+    rm -rf "$COMFY_DIR/custom_nodes"
+    mkdir -p "$COMFY_DIR/custom_nodes"
+    restore_nodes_from_volume > /dev/null
+    assert_eq "the node comes back on the next pod" "1" \
+        "$([ -f "$cnr/nodes.py" ] && echo 1 || echo 0)"
+
+    # Uninstalling it in the UI must not be undone by the archive.
+    rm -rf "$cnr"
+    sync_nodes_to_volume > /dev/null
+    assert_eq "an uninstalled node's archive is dropped" "0" \
+        "$(find "$NODE_ARCHIVE_DIR" -name 'comfyui-fancynode.tar' | wc -l)"
+
+    # ...but only once a restore has run, or a fresh pod would wipe the lot.
+    printf 'x' > "$NODE_ARCHIVE_DIR/other.tar"
+    rm -f "$(node_restore_flag)"
+    sync_nodes_to_volume > /dev/null
+    assert_eq "archives are never pruned before this boot's restore" "1" \
+        "$(find "$NODE_ARCHIVE_DIR" -name 'other.tar' | wc -l)"
+    cleanup_env
+fi
+
+###############################################################################
+if suite "layout: node-sync keeps oversized nodes out of the archive"; then
+    new_env
+    export COMFY_DIR="$WS/opt/ComfyUI" COMFY_CODE_LOCATION=container
+    mkdir -p "$COMFY_DIR/custom_nodes"
+    # shellcheck disable=SC1091
+    source "$REPO/scripts/lib.sh"
+    ensure_dirs
+    export SCRIPT_DIR="$REPO/scripts" NODE_ARCHIVE_MAX_MB=1
+    big="$COMFY_DIR/custom_nodes/huge-node"
+    mkdir -p "$big"
+    head -c 3000000 /dev/zero > "$big/blob.dat"
+    out="$(sync_nodes_to_volume 2>&1)"
+    assert_eq "an oversized node is not archived" "0" \
+        "$(find "$NODE_ARCHIVE_DIR" -name 'huge-node.tar' | wc -l)"
+    assert_contains "and the user is told why" "NODE_ARCHIVE_MAX_MB" "$out"
     cleanup_env
 fi
 
@@ -635,6 +808,130 @@ MANIFEST
     assert_rc "verify does not fail on a missing optional file" 0 "$rc"
     assert_contains "verify labels it OPTIONAL" "OPTIONAL" "$out"
     cleanup_env
+fi
+
+
+###############################################################################
+if suite "cuda: driver floor is enforced per CUDA major"; then
+    new_env
+    # shellcheck disable=SC1091
+    source "$REPO/scripts/lib.sh"; ensure_dirs
+    PY=python3
+    mk_smi() { printf '#!/bin/bash\necho "%s"\n' "$1" > "$BINS/nvidia-smi"; chmod +x "$BINS/nvidia-smi"; }
+    # The __pycache__ purge is not optional: "13.0" and "12.8" are the same
+    # length, so a rewrite inside the same second leaves mtime+size unchanged
+    # and python happily reuses the previous .pyc.
+    mk_torch() {
+        mkdir -p "$WS/cu"; rm -rf "$WS/cu/__pycache__"
+        printf "class version: cuda = '%s'\n" "$1" > "$WS/cu/torch.py"
+        fake_python "$WS/cu"
+    }
+
+    mk_torch 13.0; mk_smi "580.159.04"
+    out="$(driver_check)"; rc=$?
+    assert_rc "driver 580 accepted for a CUDA 13 build" 0 "$rc"
+    assert_contains "verdict names the CUDA major" "CUDA 13" "$out"
+
+    mk_torch 13.0; mk_smi "570.86.15"
+    out="$(driver_check)"; rc=$?
+    assert_rc "driver 570 rejected for a CUDA 13 build" 1 "$rc"
+    assert_contains "verdict says what is needed" ">= 580" "$out"
+
+    mk_torch 12.8; mk_smi "570.86.15"
+    driver_check > /dev/null; rc=$?
+    assert_rc "driver 570 is fine for a CUDA 12.8 build" 0 "$rc"
+
+    mk_torch 12.8; mk_smi "520.61.05"
+    driver_check > /dev/null; rc=$?
+    assert_rc "driver 520 rejected even for CUDA 12" 1 "$rc"
+
+    rm -f "$BINS/nvidia-smi"
+    driver_check > /dev/null; rc=$?
+    assert_rc "no driver at all is not treated as a failure" 0 "$rc"
+    cleanup_env
+fi
+
+###############################################################################
+if suite "install-torch: falls back to the next index when one has nothing usable"; then
+    new_env
+    mkdir -p "$WS/venv/bin" "$WS/active"
+    cat > "$WS/venv/bin/python" <<EOF
+#!/bin/bash
+export PYTHONPATH="$WS/active"
+exec "$REAL_PY3" "\$@"
+EOF
+    printf '#!/bin/bash\ncase "$1 $2" in "index versions") echo "torch (2.11.0)";; freeze*) echo "torch==2.11.0+cu128";; esac\n' \
+        > "$WS/venv/bin/pip"
+    # cu130 index: only ever yields a CPU-only wheel. cu128: yields a good one.
+    cat > "$BINS/uv" <<EOF
+#!/bin/bash
+case "\$*" in
+  *cu130*) cat > "$WS/active/torch.py" <<'T'
+__version__ = "2.11.0+cpu"
+class version: cuda = None
+class _C: pass
+class cuda:
+    @staticmethod
+    def is_available(): return False
+    @staticmethod
+    def get_arch_list(): return []
+T
+  ;;
+  *) cat > "$WS/active/torch.py" <<'T'
+__version__ = "2.11.0+cu128"
+class version: cuda = "12.8"
+class _C:
+    @staticmethod
+    def _cuda_getArchFlags(): return "sm_80 sm_86 sm_90 sm_120 compute_120"
+class cuda:
+    @staticmethod
+    def is_available(): return False
+    @staticmethod
+    def get_arch_list(): return []
+T
+  ;;
+esac
+EOF
+    chmod +x "$WS/venv/bin/python" "$WS/venv/bin/pip" "$BINS/uv"
+    out="$(TORCH_CANDIDATES="torch==2.11.0" bash "$REPO/docker/install-torch.sh" "$WS/venv" \
+        "https://fake/cu130 https://fake/cu128" "$WS/c.txt" 2>&1)"; rc=$?
+    assert_rc "the build succeeds via the fallback index" 0 "$rc"
+    assert_contains "the first index was tried" "index: https://fake/cu130" "$out"
+    assert_contains "and reported as unusable" "falling back to the next index" "$out"
+    assert_contains "the fallback index is the one accepted" "from https://fake/cu128" "$out"
+    cleanup_env
+fi
+
+###############################################################################
+if suite "dockerfile: base image, torch index and build assertions stay in sync"; then
+    # A CUDA 12 toolkit under a cu130 torch does not fail loudly — torch simply
+    # refuses to compile extensions, SageAttention 2 falls back to the v1 wheel
+    # and the image ships quietly slower. Keep the two majors welded together.
+    cuda_major_of() { # <string containing cuda<digits> or cu<digits>>
+        local d=""
+        [[ "$1" =~ cuda:?([0-9]+) ]] && d="${BASH_REMATCH[1]}"
+        [ -z "$d" ] && [[ "$1" =~ cu([0-9]{3,4}) ]] && d="${BASH_REMATCH[1]}"
+        [ -z "$d" ] && return 1
+        if [ "${#d}" -ge 3 ]; then printf '%s' "${d:0:2}"; else printf '%s' "$d"; fi
+    }
+    from_line="$(grep -m1 '^FROM ' "$REPO/Dockerfile")"
+    idx_line="$(grep -m1 '^ENV TORCH_INDEX=' "$REPO/Dockerfile" | tr -d '"')"
+    first_index="${idx_line#*=}"; first_index="${first_index%% *}"
+
+    base_major="$(cuda_major_of "$from_line")"
+    idx_major="$(cuda_major_of "$first_index")"
+    assert_eq "the base image's CUDA major matches the preferred torch index" \
+        "$base_major" "$idx_major"
+    assert_contains "the base is a devel/CUDA image, not a bare OS" "cuda" "$from_line"
+
+    # Both of these were absent from ComfyUI tags that are only weeks old, and
+    # each one silently breaks a headline feature.
+    assert_contains "build asserts the Manager-unblocking API" \
+        "get_system_user_directory" "$(cat "$REPO/Dockerfile")"
+    assert_contains "build asserts MiniMax H3 support" \
+        "class MiniMaxH3" "$(cat "$REPO/Dockerfile")"
+    assert_contains "sage build is gated on a matching nvcc" \
+        "nvcc-check.sh" "$(cat "$REPO/Dockerfile")"
 fi
 
 ###############################################################################

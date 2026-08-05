@@ -34,16 +34,32 @@ if [ -x "$PY" ]; then
     fi
     # CUDA 13 wheels need a much newer driver than CUDA 12.8 ones; a mismatch
     # shows up as torch failing at the first CUDA call, not at import.
-    drv="$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -1)"
+    if verdict="$(driver_check)"; then
+        ok "$verdict"
+    else
+        bad "$verdict"
+        bad "  redeploy on a newer host, or build the image with"
+        bad "  TORCH_INDEX=https://download.pytorch.org/whl/cu128"
+    fi
+    # NVFP4 (the default MiniMax H3 text encoder) is only hardware-accelerated
+    # on a CUDA 13 build; on cu128 it is emulated and slower than fp8.
     cu_major="$("$PY" -c 'import torch; print((torch.version.cuda or "0.0").split(".")[0])' 2>/dev/null)"
-    if [ -n "$drv" ] && [ -n "$cu_major" ]; then
-        need=525; [ "$cu_major" = "13" ] && need=580
-        drv_major="${drv%%.*}"
-        if [ "${drv_major:-0}" -lt "$need" ] 2>/dev/null; then
-            bad "driver $drv is too old for a CUDA $cu_major build (needs >= $need) — use a cu128 image or a newer host"
-        else
-            ok "driver $drv supports the installed CUDA $cu_major build"
-        fi
+    if [ "$cu_major" = "13" ]; then
+        ok "CUDA 13: NVFP4 models run on the FP4 hardware path"
+    elif [ -n "$cu_major" ]; then
+        wrn "CUDA $cu_major: NVFP4/INT8 models (e.g. the MiniMax H3 text encoder) fall back"
+        wrn "  to an emulated path and will be slower than fp8. Rebuild the image on cu130"
+        wrn "  for the hardware path — needs driver >= $CUDA13_MIN_DRIVER."
+    fi
+    # SageAttention is compiled against a specific torch; a torch change breaks
+    # the import, and the only symptom is the KJNodes patch node erroring
+    # mid-workflow.
+    if "$PY" -c 'import sageattention' 2> /dev/null; then
+        ok "SageAttention $("$PY" -c 'import sageattention as s; print(getattr(s, "__version__", "?"))' 2> /dev/null) imports"
+    else
+        wrn "SageAttention does not import — the KJNodes \"Patch Sage Attention\" node will"
+        wrn "  fail; it was built for a different torch. Rebuild the image, or install a"
+        wrn "  wheel matching this torch."
     fi
 else
     bad "venv missing at $VENV_DIR — run: bash $SCRIPT_DIR/start.sh"
@@ -69,13 +85,32 @@ else
     bad "ComfyUI not installed at $COMFY_DIR"
 fi
 
+if [ -f "$COMFY_DIR/comfy/supported_models.py" ]; then
+    if comfy_supports_minimax; then
+        ok "ComfyUI knows MiniMax H3 (the default preset)"
+    else
+        bad "this ComfyUI predates MiniMax H3 (needs >= v0.30.0) — the preset's weights"
+        bad "  will download and then refuse to load. Fix: comfypod-update"
+    fi
+fi
+
 ok "ComfyUI code: $COMFY_DIR ($COMFY_CODE_LOCATION), data: $COMFY_DATA_DIR"
 if [ "$COMFY_CODE_LOCATION" = "volume" ] && [ -d /opt/ComfyUI ]; then
     wrn "running code from the network volume — restarts and node installs will be slow;"
     wrn "  unset COMFY_CODE_LOCATION (or set it to 'container') to use the image's copy"
 fi
 
-for svc in comfyui filebrowser jupyter idle-guard; do
+if [ "$COMFY_CODE_LOCATION" = "container" ]; then
+    n_arch="$(find "$NODE_ARCHIVE_DIR" -name '*.tar' 2> /dev/null | wc -l)"
+    n_git="$(grep -cvE '^\s*(#|$)' "$STATE_DIR/extra-nodes.txt" 2> /dev/null || echo 0)"
+    ok "node persistence: $n_arch archived + $n_git recorded by git URL"
+    if ! service_running node-sync; then
+        wrn "node-sync is not running — nodes installed from the Manager UI from here on"
+        wrn "  will NOT survive this pod: bash $SCRIPT_DIR/start.sh"
+    fi
+fi
+
+for svc in comfyui filebrowser jupyter idle-guard node-sync; do
     if service_running "$svc"; then
         ok "service running: $svc"
     elif [ "$svc" = "jupyter" ] && ! port_free "$JUPYTER_PORT"; then

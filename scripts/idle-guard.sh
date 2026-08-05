@@ -46,6 +46,9 @@ while true; do
     idle_min=$((idle_min + 1))
     if [ "$idle_min" -ge "$IDLE_TIMEOUT_MINUTES" ]; then
         log "idle for ${idle_min} min — stopping pod $RUNPOD_POD_ID (volume and models persist)"
+        # The pod is about to go away with its container disk; make sure any
+        # node installed from the UI is on the volume first.
+        persist_nodes
         runpodctl stop pod "$RUNPOD_POD_ID" && sleep 300
         idle_min=0
     fi

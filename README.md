@@ -15,8 +15,8 @@ generating again in a couple of minutes.
 | 🔒 **Private by default** | ComfyUI behind **ComfyUI-Login** (cookie/session auth that also guards the API and survives the WebSocket handshake, unlike basic auth). An auth-guard verifies the login page actually intercepts before ComfyUI stays on a public bind — otherwise it's forced back to localhost (fail closed). FileBrowser has its own login; Jupyter is token-protected. |
 | 🔑 **API keys** | HF/Civitai tokens sent as `Authorization: Bearer` headers from 0600 files — never in URLs, process listings or logs (all logging is secret-redacted) |
 | 💾 **Persistent** | Models, nodes, workflows, outputs, credentials, package lockfile and caches on `/workspace`; the Python env rebuilds on fast container disk each boot via **uv** (~1 min warm) |
-| 🛡️ **Stable** | torch pinned via constraints on **every** install path — no custom node can silently downgrade torch and brick a 5090 (sm_120). The image build *verifies* torch carries `sm_120`/`sm_89` kernels and fails in CI rather than on your pod. Versions stay pinned until `comfypod-update`; `comfypod-snapshot restore baseline` undoes a broken update. |
-| ⚡ **Tuned** | torch 2.11 (newest triple where torch/vision/audio align) on CUDA 12.8, SageAttention 2 compiled into the image, `--fast fp16_accumulation` on by default, `expandable_segments` to survive the text-encoder/diffusion offload churn |
+| 🛡️ **Stable** | torch pinned via constraints on **every** install path — no custom node can silently downgrade torch and brick a 5090 (sm_120). The image build *verifies* each candidate: `sm_120`/`sm_89` kernel coverage, torchvision and torchaudio actually importing against it, and an nvcc whose CUDA major matches — rejecting the combination in CI instead of on your pod. Versions stay pinned until `comfypod-update`; `comfypod-snapshot restore baseline` undoes a broken update. |
+| ⚡ **Tuned** | **CUDA 13** torch — the only build where MiniMax H3's NVFP4/INT8 weights hit the hardware path instead of an emulated one (roughly 3× on reported timings). SageAttention 2 compiled into the image against a matching nvcc, `--fast fp16_accumulation` on by default, `expandable_segments` to survive the text-encoder/diffusion offload churn. Needs driver ≥ 580; older hosts are detected at boot, not left to fail. |
 | 🧩 **Managers** | ComfyUI-Manager (nodes) + ComfyUI-Model-Manager (in-UI model browser with HF/Civitai tokens) + 7 more curated nodes |
 | 📁 **Filesystem** | FileBrowser (upload/download anything) + JupyterLab (terminal, pip) + SSH; `ADMIN_LOCAL_ONLY=true` locks both behind an SSH tunnel |
 | 💸 **Cost-aware** | Idle auto-stop (default 30 min: no job, no open tab, no download → pod stops, volume persists) |
@@ -160,6 +160,8 @@ Secrets (seeded to the volume on first boot):
     ├── constraints.txt       # the torch pin every installer must obey
     ├── requirements.lock     # full Python env, restored each boot via uv
     ├── nodes.lock            # exact commit of every custom node
+    ├── extra-nodes.txt       # git remotes of nodes you added, re-cloned each pod
+    ├── node-archives/        # one tar per registry-installed node (no git remote)
     ├── snapshots/            # rollback points (baseline + pre-update-*)
     ├── cache/                # uv wheel cache + HF cache
     └── logs/                 # comfyui.log, downloads.log, auth-guard.log …
@@ -187,6 +189,7 @@ the lockfile via uv (~1 min warm; `VENV_LOCATION=volume` persists it instead).
 | Node update broke the graph | `comfypod-snapshot restore baseline` (or the auto-saved `pre-update-*`) |
 | **Manager can't install/update nodes** | `comfypod-doctor` names the cause. Most often ComfyUI is too old to expose the System User Protection API, in which case Manager force-sets `security_level=strong` and blocks everything regardless of config → `comfypod-update`. Otherwise set `MANAGER_SECURITY_LEVEL=weak` and restart. Guaranteed fallback: `comfypod-node add <git-url>` |
 | A node imports fine but its Python deps are missing | `comfypod-node fix` (reinstalls requirements for every node), then restart |
+| **A node I installed is gone on a new pod** | ComfyUI's code runs from container disk (imports from the volume are far too slow), so the `node-sync` service copies UI-installed nodes to the volume every 2 min and `start.sh` puts them back. `comfypod-doctor` shows the counts and whether node-sync is running. A node bigger than `NODE_ARCHIVE_MAX_MB` (512 by default — nodes that download weights into their own folder) is skipped with a warning; raise the limit or install it via `comfypod-node add <git-url>`, which persists by URL at any size |
 | Wonky Python state | `rm -rf /opt/comfypod-venv` → next boot rebuilds from the lockfile; `rm /workspace/.comfypod/requirements.lock` too for a from-scratch resolve |
 
 ## First-run validation checklist
@@ -208,6 +211,9 @@ idle-stop triggers on an idle pod but not during a long job.
   T2V/I2V download. The pruned variants are what fit a single GPU — bf16 is
   66 GB. Its text encoder has no fp8 build, so the preset pairs it with the
   NVFP4 AWQ Qwen3-VL-32B (Blackwell-only; `minimax-h3-ada` covers 4090/Ada).
+  That choice is what forces CUDA 13: NVFP4 has a hardware path only on a
+  cu130 torch, and the emulated fallback is slower than fp8 would have been —
+  so the quant and the CUDA version are one decision, not two.
 - **ComfyUI-Login over basic-auth proxy** — browsers don't reliably attach
   `Authorization` headers to WebSocket upgrades, and ComfyUI's progress
   channel is a WebSocket; cookie auth survives it on every browser.

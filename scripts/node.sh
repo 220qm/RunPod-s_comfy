@@ -8,6 +8,7 @@
 #   comfypod-node remove <name>         uninstall and forget it
 #   comfypod-node list                  show installed nodes and their origin
 #   comfypod-node fix                   reinstall python deps for every node
+#   comfypod-node sync                  persist UI-installed nodes to the volume now
 #
 # After add/remove, restart ComfyUI to load the change:
 #   comfypod-stop && bash <repo>/scripts/start.sh
@@ -121,5 +122,8 @@ case "${1:-}" in
     remove) shift; cmd_remove "${1:?usage: comfypod-node remove <name>}" ;;
     list)   cmd_list ;;
     fix)    cmd_fix ;;
-    *)      sed -n '2,16p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 1 ;;
+    # The node-sync service does this every couple of minutes; this is the
+    # button for "I just installed something and I'm terminating the pod now".
+    sync)   persist_nodes; log "custom nodes persisted to $NODE_ARCHIVE_DIR" ;;
+    *)      sed -n '2,17p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 1 ;;
 esac
