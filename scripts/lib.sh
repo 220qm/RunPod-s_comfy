@@ -57,7 +57,11 @@ export EXTRA_NODES="${EXTRA_NODES:-}"
 # download their own weights into their own folder).
 export NODE_SYNC_INTERVAL="${NODE_SYNC_INTERVAL:-120}"
 export NODE_ARCHIVE_MAX_MB="${NODE_ARCHIVE_MAX_MB:-512}"
-export AUTO_UPDATE="${AUTO_UPDATE:-false}"
+# Every boot brings ComfyUI to the newest release tag and fast-forwards every
+# git-backed custom node, then reports what still imports. Off means the pod
+# stays at whatever the image baked, which is how a workflow downloaded today
+# ends up reporting missing node types on a months-old pod.
+export AUTO_UPDATE="${AUTO_UPDATE:-true}"
 export ENABLE_JUPYTER="${ENABLE_JUPYTER:-true}"
 # auto: install SageAttention for per-workflow use (KJNodes "Patch Sage
 #       Attention") but do NOT enable it globally — the global flag has
@@ -390,11 +394,19 @@ comfy_has_system_user_api() {
     grep -q "def get_system_user_directory" "$COMFY_DIR/folder_paths.py" 2>/dev/null
 }
 
-# MiniMax H3 (the default model preset) landed in ComfyUI v0.30.0. On anything
-# older the weights download fine and then fail to load, which looks like a bad
-# download rather than an out-of-date ComfyUI.
+# The two model families this stack targets, each detected by the class that
+# implements it rather than by version arithmetic — a checkout can be a tag, a
+# branch or a commit, and only the code is authoritative.
+#
+# MiniMax H3 landed in ComfyUI v0.30.0. On anything older its weights download
+# fine and then fail to load, which looks like a bad download rather than an
+# out-of-date ComfyUI. Krea 2 needs the krea2 architecture from v0.26.0.
 comfy_supports_minimax() {
     grep -q "class MiniMaxH3" "$COMFY_DIR/comfy/supported_models.py" 2>/dev/null
+}
+
+comfy_supports_krea2() {
+    grep -q "class Krea2" "$COMFY_DIR/comfy/supported_models.py" 2>/dev/null
 }
 
 # ---------------------------------------------------------------------------

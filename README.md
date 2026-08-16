@@ -17,7 +17,8 @@ generating again in a couple of minutes.
 | 💾 **Persistent** | Models, nodes, workflows, outputs, credentials, package lockfile and caches on `/workspace`; the Python env rebuilds on fast container disk each boot via **uv** (~1 min warm) |
 | 🛡️ **Stable** | torch pinned via constraints on **every** install path — no custom node can silently downgrade torch and brick a 5090 (sm_120). The image build *verifies* each candidate: `sm_120`/`sm_89` kernel coverage, torchvision and torchaudio actually importing against it, and an nvcc whose CUDA major matches — rejecting the combination in CI instead of on your pod. Versions stay pinned until `comfypod-update`; `comfypod-snapshot restore baseline` undoes a broken update. |
 | ⚡ **Tuned** | **CUDA 13** torch — the only build where MiniMax H3's NVFP4/INT8 weights hit the hardware path instead of an emulated one (roughly 3× on reported timings). SageAttention 2 compiled into the image against a matching nvcc, `--fast fp16_accumulation` on by default, `expandable_segments` to survive the text-encoder/diffusion offload churn. Needs driver ≥ 580; older hosts are detected at boot, not left to fail. |
-| 🧩 **Managers** | ComfyUI-Manager (nodes) + ComfyUI-Model-Manager (in-UI model browser with HF/Civitai tokens) + 7 more curated nodes |
+| 🧩 **Nodes** | 16 curated packs, picked for these two models: RES4LYF (`res_2s`) + Ultimate SD Upscale + Impact Pack for Krea 2, RIFE + VideoHelperSuite + KJNodes + Sol-Attn for H3, plus ComfyUI-Manager and an in-UI model browser with HF/Civitai tokens |
+| 🔄 **Current** | every boot pulls the newest ComfyUI release and fast-forwards every node, reinstalls whatever their requirements now want, then prints a compatibility report naming anything that failed to import. A ComfyUI that won't install its own requirements is rolled back automatically |
 | 📁 **Filesystem** | FileBrowser (upload/download anything) + JupyterLab (terminal, pip) + SSH; `ADMIN_LOCAL_ONLY=true` locks both behind an SSH tunnel |
 | 💸 **Cost-aware** | Idle auto-stop (default 30 min: no job, no open tab, no download → pod stops, volume persists) |
 
@@ -126,7 +127,8 @@ Secrets (seeded to the volume on first boot):
 | `VENV_LOCATION` | `container` | `volume` = persist the venv instead of rebuilding |
 | `EXTRA_NODES` | — | comma-separated git URLs (`url@commit` to pin) |
 | `COMFYUI_FLAGS` | — | extra ComfyUI args (`--fast`, `--highvram`, …) |
-| `AUTO_UPDATE` | `false` | stay pinned until `comfypod-update` |
+| `AUTO_UPDATE` | `true` | every boot: newest ComfyUI release + fast-forward every node + compatibility report. `false` freezes at the image's versions |
+| `COMFYUI_REF` | `latest` | pin ComfyUI to a tag/commit instead of tracking releases |
 | `ENABLE_JUPYTER` | `true` | JupyterLab on 8888 |
 
 ## Security model

@@ -903,6 +903,136 @@ EOF
 fi
 
 ###############################################################################
+if suite "update: ComfyUI moves to the newest tag, and rolls back if it won't install"; then
+    new_env
+    export COMFY_DIR="$WS/opt/ComfyUI" COMFY_CODE_LOCATION=container AUTO_UPDATE=true
+    # shellcheck disable=SC1091
+    source "$REPO/scripts/lib.sh"; ensure_dirs
+    export SCRIPT_DIR="$REPO/scripts"
+
+    # An "upstream" ComfyUI with two releases; the pod starts on the older one.
+    up="$WS/upstream"; mkdir -p "$up"
+    ( cd "$up" && git init -q . && git config user.email t@t && git config user.name t
+      mkdir -p comfy
+      echo "torch" > requirements.txt
+      echo "class Krea2(x): pass" > comfy/supported_models.py
+      git add -A && git commit -qm v1 && git tag v0.26.0
+      printf 'class Krea2(x): pass\nclass MiniMaxH3(x): pass\n' > comfy/supported_models.py
+      echo "torch" > requirements.txt; echo "blake3" >> requirements.txt
+      git add -A && git commit -qm v2 && git tag v0.30.0 ) > /dev/null 2>&1
+    git clone -q "$up" "$COMFY_DIR" > /dev/null 2>&1
+    git -C "$COMFY_DIR" checkout -q v0.26.0
+
+    # Only the pieces of start.sh under test; the rest of that file needs a pod.
+    eval "$(awk '/^COMFY_REQS_DONE=0/,/^}$/' "$REPO/scripts/start.sh")"
+    eval "$(awk '/^update_comfyui_checkout\(\)/,/^}$/' "$REPO/scripts/start.sh")"
+    REQS_OK=yes
+    comfy_requirements_ok() { [ "$REQS_OK" = yes ] && { COMFY_REQS_DONE=1; return 0; }; return 1; }
+    run_with_heartbeat() { shift 2; "$@"; }
+
+    assert_eq "starts on the old release" "0" \
+        "$(comfy_supports_minimax && echo 1 || echo 0)"
+    out="$(update_comfyui_checkout 2>&1)"
+    assert_contains "the newer tag is picked up" "v0.30.0" "$out"
+    assert_eq "and the model it adds is now supported" "1" \
+        "$(comfy_supports_minimax && echo 1 || echo 0)"
+
+    # Same again, but the new tree's requirements refuse to install.
+    git -C "$COMFY_DIR" checkout -q v0.26.0
+    # shellcheck disable=SC2034  # both are read by the eval'd start.sh functions
+    COMFY_REQS_DONE=0; REQS_OK=no
+    out="$(update_comfyui_checkout 2>&1)"; rc=$?
+    assert_rc "a broken update reports failure" 1 "$rc"
+    assert_contains "and says it is rolling back" "rolling back" "$out"
+    assert_eq "the working version is what remains checked out" "v0.26.0" \
+        "$(git -C "$COMFY_DIR" describe --tags 2>/dev/null)"
+
+    # Opting out must be a genuine no-op.
+    AUTO_UPDATE=false REQS_OK=yes
+    out="$(update_comfyui_checkout 2>&1)"
+    assert_contains "AUTO_UPDATE=false leaves the checkout alone" "AUTO_UPDATE=false" "$out"
+    assert_eq "still on the pinned tag" "v0.26.0" \
+        "$(git -C "$COMFY_DIR" describe --tags 2>/dev/null)"
+    cleanup_env
+fi
+
+###############################################################################
+if suite "update: custom nodes fast-forward, pinned ones are left alone"; then
+    new_env
+    export COMFY_DIR="$WS/opt/ComfyUI" COMFY_CODE_LOCATION=container AUTO_UPDATE=true
+    # shellcheck disable=SC1091
+    source "$REPO/scripts/lib.sh"; ensure_dirs
+    export SCRIPT_DIR="$REPO/scripts"
+    mkdir -p "$COMFY_DIR/custom_nodes"
+    eval "$(awk '/^update_one_node\(\)/,/^}$/' "$REPO/scripts/start.sh")"
+    eval "$(awk '/^update_custom_nodes\(\)/,/^}$/' "$REPO/scripts/start.sh")"
+
+    for n in TrackingNode PinnedNode; do
+        remote="$WS/remote-$n"; mkdir -p "$remote"
+        ( cd "$remote" && git init -q . && git config user.email t@t && git config user.name t
+          echo v1 > f && git add -A && git commit -qm one ) > /dev/null 2>&1
+        git clone -q "$remote" "$COMFY_DIR/custom_nodes/$n" > /dev/null 2>&1
+        ( cd "$remote" && echo v2 > f && git add -A && git commit -qm two ) > /dev/null 2>&1
+    done
+    # A pinned node is a detached HEAD — exactly what nodes.txt @ref produces.
+    git -C "$COMFY_DIR/custom_nodes/PinnedNode" checkout -q --detach HEAD
+    # A hand-copied node with no git at all must not blow anything up.
+    mkdir -p "$COMFY_DIR/custom_nodes/PlainNode"
+
+    out="$(update_custom_nodes 2>&1)"
+    assert_contains "the tracking node moved" "updated node: TrackingNode" "$out"
+    assert_eq "and its working tree really is the new commit" "v2" \
+        "$(cat "$COMFY_DIR/custom_nodes/TrackingNode/f")"
+    assert_eq "the pinned node was not touched" "v1" \
+        "$(cat "$COMFY_DIR/custom_nodes/PinnedNode/f")"
+    assert_contains "the summary counts a pin as pinned" "1 pinned" "$out"
+
+    AUTO_UPDATE=false
+    out="$(update_custom_nodes 2>&1)"
+    assert_contains "AUTO_UPDATE=false skips node updates entirely" "left at their installed commits" "$out"
+    cleanup_env
+fi
+
+###############################################################################
+if suite "compat: the boot report names nodes that failed to import"; then
+    new_env
+    export COMFY_DIR="$WS/opt/ComfyUI" COMFY_CODE_LOCATION=container
+    # shellcheck disable=SC1091
+    source "$REPO/scripts/lib.sh"; ensure_dirs
+    export SCRIPT_DIR="$REPO/scripts"
+    mkdir -p "$COMFY_DIR/comfy" "$COMFY_DIR/custom_nodes/A"
+    printf 'class Krea2(x): pass\nclass MiniMaxH3(x): pass\n' > "$COMFY_DIR/comfy/supported_models.py"
+    eval "$(awk '/^compatibility_report\(\)/,/^}$/' "$REPO/scripts/start.sh")"
+    # No server, no waiting: the point under test is the log parsing.
+    curl() { return 1; }
+    sleep() { :; }
+    torch_report() { echo "torch 2.13.0+cu130"; }
+    driver_check() { echo "driver 580 ok"; }
+
+    # A failure from an earlier boot, then this boot's output after the offset.
+    printf 'IMPORT FAILED: GhostNodeFromLastWeek\n' > "$LOG_DIR/comfyui.log"
+    COMFY_LOG_OFFSET=2
+    printf 'Starting server\nIMPORT FAILED: BrokenNode\n' >> "$LOG_DIR/comfyui.log"
+
+    out="$(compatibility_report 2>&1)"
+    assert_contains "this boot's failure is reported" "BrokenNode" "$out"
+    assert_not_contains "a stale failure from an earlier boot is not" "GhostNodeFromLastWeek" "$out"
+    assert_contains "both target models are checked" "MiniMax:  supported" "$out"
+    assert_contains "Krea 2 too" "Krea 2:   supported" "$out"
+    assert_contains "and it says how to recover" "comfypod-snapshot restore pre-boot" "$out"
+    assert_eq "the report is written for doctor to pick up" "1" \
+        "$([ -f "$STATE_DIR/COMPATIBILITY.txt" ] && echo 1 || echo 0)"
+
+    : > "$LOG_DIR/comfyui.log"
+    # shellcheck disable=SC2034  # read by the eval'd compatibility_report
+    COMFY_LOG_OFFSET=1
+    printf 'Starting server\n' >> "$LOG_DIR/comfyui.log"
+    out="$(compatibility_report 2>&1)"
+    assert_contains "a clean boot says so plainly" "every custom node imported cleanly" "$out"
+    cleanup_env
+fi
+
+###############################################################################
 if suite "dockerfile: base image, torch index and build assertions stay in sync"; then
     # A CUDA 12 toolkit under a cu130 torch does not fail loudly — torch simply
     # refuses to compile extensions, SageAttention 2 falls back to the v1 wheel
