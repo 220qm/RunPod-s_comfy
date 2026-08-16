@@ -86,11 +86,26 @@ else
 fi
 
 if [ -f "$COMFY_DIR/comfy/supported_models.py" ]; then
+    comfy_supports_krea2 && ok "ComfyUI knows Krea 2" \
+        || bad "this ComfyUI predates Krea 2 (needs >= v0.26.0) — fix: comfypod-update"
     if comfy_supports_minimax; then
         ok "ComfyUI knows MiniMax H3 (the default preset)"
     else
         bad "this ComfyUI predates MiniMax H3 (needs >= v0.30.0) — the preset's weights"
         bad "  will download and then refuse to load. Fix: comfypod-update"
+    fi
+fi
+
+# The boot's own compatibility check already asked ComfyUI which nodes loaded;
+# repeating the question here would only give a staler answer.
+if [ -f "$STATE_DIR/COMPATIBILITY.txt" ]; then
+    if grep -q "every custom node imported cleanly" "$STATE_DIR/COMPATIBILITY.txt"; then
+        ok "last boot: every custom node imported cleanly"
+    else
+        bad "last boot reported node import failures:"
+        sed -n '/failed to import this boot/,/^$/p' "$STATE_DIR/COMPATIBILITY.txt" \
+            | sed 's/^/       /'
+        bad "  full report: $STATE_DIR/COMPATIBILITY.txt"
     fi
 fi
 

@@ -1,9 +1,17 @@
-# Custom nodes installed on first boot.
+# Custom nodes installed into the image and refreshed on every boot.
 # Format: <git-url>[@commit-or-tag]  — pin anything you need reproducible.
-# Kept deliberately small: every node is a potential import error at boot.
-# Add more here, via the EXTRA_NODES env var (comma-separated), or from the
-# ComfyUI-Manager UI. The exact installed commits are recorded on every boot
-# in /workspace/.comfypod/nodes.lock and restorable with `comfypod-snapshot`.
+#
+# The list is curated for the two models this stack targets: Krea 2 for images
+# and MiniMax H3 for video. Everything here is either infrastructure or shows
+# up in the community workflows for those two; anything speculative lives in
+# the optional block at the bottom, one uncomment away.
+#
+# Nodes you add from the ComfyUI-Manager UI persist too (node-sync archives
+# them to the volume), as do `comfypod-node add <url>` and the EXTRA_NODES env
+# var. Exact installed commits are recorded each boot in
+# /workspace/.comfypod/nodes.lock and restorable with `comfypod-snapshot`.
+
+# --- infrastructure --------------------------------------------------------
 
 # Node/model management UI + the snapshot/CLI machinery
 https://github.com/Comfy-Org/ComfyUI-Manager
@@ -15,13 +23,6 @@ https://github.com/liusida/ComfyUI-Login
 # In-UI model browser/downloader with HuggingFace + Civitai token support
 https://github.com/hayden-fr/ComfyUI-Model-Manager
 
-# Kijai's utility nodes — includes "Patch Sage Attention" (the safe,
-# per-workflow way to use SageAttention on Qwen-family models)
-https://github.com/kijai/ComfyUI-KJNodes
-
-# Video encode/decode/combine — required by nearly every video workflow
-https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite
-
 # Live GPU/VRAM/disk monitor in the toolbar — you're paying by the hour
 https://github.com/crystian/ComfyUI-Crystools
 
@@ -31,15 +32,61 @@ https://github.com/rgthree/rgthree-comfy
 # Autocomplete, snap-to-grid, workflow image metadata
 https://github.com/pythongosssss/ComfyUI-Custom-Scripts
 
-# GGUF quantized model loading (fallback tier if a 24 GB card OOMs)
+# --- video: MiniMax H3 -----------------------------------------------------
+
+# Kijai's utility nodes — includes "Patch Sage Attention" (the safe,
+# per-workflow way to use SageAttention) and most video-workflow helpers
+https://github.com/kijai/ComfyUI-KJNodes
+
+# Video encode/decode/combine and audio muxing — required by nearly every
+# video workflow, and by H3's native audio track
+https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite
+
+# RIFE frame interpolation: H3 renders at a fixed frame rate, this doubles or
+# triples it instead of paying for more sampled frames
+https://github.com/Fannovel16/ComfyUI-Frame-Interpolation
+
+# Sol-Attn triton kernels — kijai's experimental attention implementation,
+# tested on exactly this hardware (4090/5090) with MiniMax H3. Alternative to
+# SageAttention, not a companion: use one or the other in a workflow.
+https://github.com/kijai/ComfyUI-SolAttn_triton
+
+# --- image: Krea 2 ---------------------------------------------------------
+
+# RES4LYF: the res_2s / beta57 sampler family Krea 2 workflows lean on for
+# its aesthetic, plus the ClownsharKSampler variants
+https://github.com/ClownsharkBatwing/RES4LYF
+
+# Tiled high-res finishing pass — the standard way to take a 1024px Krea 2
+# still to print size without a second full-resolution sample
+https://github.com/ssitu/ComfyUI_UltimateSDUpscale
+
+# Face/hand/eye detailing (FaceDetailer, SEGS) — what closes the gap on small
+# faces in wide shots. Subpack carries the Ultralytics detector provider that
+# Impact Pack's detailers expect.
+https://github.com/ltdrdata/ComfyUI-Impact-Pack
+https://github.com/ltdrdata/ComfyUI-Impact-Subpack
+
+# --- general ---------------------------------------------------------------
+
+# Compact utilities used across both pipelines: resize/crop with padding,
+# mask ops, simple math, batch handling
+https://github.com/cubiq/ComfyUI_essentials
+
+# GGUF quantized model loading (the fallback tier when a 24 GB card OOMs)
 https://github.com/city96/ComfyUI-GGUF
 
-# --- Optional (uncomment or add via EXTRA_NODES) ---------------------------
-# RIFE frame interpolation — smooth/extend generated videos
-#https://github.com/Fannovel16/ComfyUI-Frame-Interpolation
-# Kijai's Wan wrapper — only needed if you also run Wan models
-#https://github.com/kijai/ComfyUI-WanVideoWrapper
-# Compact utilities (resize, sharpen, simple math)
-#https://github.com/cubiq/ComfyUI_essentials
-# Depth/pose/edge preprocessors for ControlNet workflows
+# --- Optional (uncomment, or add via EXTRA_NODES / comfypod-node add) -------
+# Depth/pose/edge preprocessors — only needed for ControlNet workflows
 #https://github.com/Fannovel16/comfyui_controlnet_aux
+# Style/identity transfer from a reference image (SD/SDXL-era technique)
+#https://github.com/cubiq/ComfyUI_IPAdapter_plus
+# Large QoL pack; overlaps heavily with rgthree + essentials
+#https://github.com/yolain/ComfyUI-Easy-Use
+# Per-step detail control on top of a sampler
+#https://github.com/Jonseed/ComfyUI-Detail-Daemon
+# Kijai's Wan wrapper — only if you also run Wan models
+#https://github.com/kijai/ComfyUI-WanVideoWrapper
+# Step caching. ComfyUI ships EasyCache/LazyCache natively now, which covers
+# the same ground for MiniMax H3 — only reach for these if that falls short.
+#https://github.com/welltop-cn/ComfyUI-TeaCache

@@ -264,6 +264,68 @@ link_comfy_data() {
     log "code on container disk ($COMFY_DIR), data on the volume ($COMFY_DATA_DIR)"
 }
 
+# Install ComfyUI's own dependencies and confirm the result is still runnable.
+# New ComfyUI releases add requirements (comfy-kitchen, comfy-aimdo and blake3
+# all appeared in v0.30), so an update that skips this comes up broken.
+COMFY_REQS_DONE=0
+comfy_requirements_ok() {
+    run_with_heartbeat "installing ComfyUI requirements" -- \
+        pkg_install -r "$COMFY_DIR/requirements.txt" || return 1
+    # A requirement that drags torch with it is the one failure that bricks the
+    # pod rather than merely annoying it.
+    torch_ok || return 1
+    COMFY_REQS_DONE=1
+    return 0
+}
+
+# Move the checkout to COMFYUI_REF (default: the newest release tag).
+#
+# The image bakes a known-good commit, so that commit is the safety net: if the
+# newer tree cannot install its requirements, or lands a torch that no longer
+# matches the GPU, the old commit is checked back out and the pod boots on
+# what worked. Doing nothing at all — which is what used to happen whenever the
+# code ran from container disk — meant the pod was frozen at the image's
+# ComfyUI version forever, however old the image had become.
+update_comfyui_checkout() {
+    [ -d "$COMFY_DIR/.git" ] || return 0
+    if [ "$AUTO_UPDATE" != "true" ]; then
+        log "AUTO_UPDATE=false — keeping ComfyUI at $(git -C "$COMFY_DIR" describe --tags --always 2>/dev/null)"
+        return 0
+    fi
+    local before target
+    before="$(git -C "$COMFY_DIR" rev-parse HEAD 2>/dev/null)" || return 0
+    if ! run_with_heartbeat "checking for a newer ComfyUI" -- \
+        timeout 180 git -C "$COMFY_DIR" fetch --quiet --tags --force origin; then
+        warn "could not reach GitHub — keeping the installed ComfyUI"
+        return 0
+    fi
+    target="$COMFYUI_REF"
+    [ "$target" = "latest" ] \
+        && target="$(git -C "$COMFY_DIR" tag -l 'v*' --sort=-version:refname | head -n1)"
+    if [ -z "$target" ]; then
+        warn "no release tag to update to — keeping the installed ComfyUI"
+        return 0
+    fi
+    if [ "$(git -C "$COMFY_DIR" rev-parse "$target^{commit}" 2>/dev/null)" = "$before" ]; then
+        log "ComfyUI already at $target"
+        return 0
+    fi
+    log "updating ComfyUI: $(git -C "$COMFY_DIR" describe --tags --always) -> $target"
+    if ! git -C "$COMFY_DIR" checkout --quiet --force "$target" 2>/dev/null; then
+        warn "checkout of $target failed — keeping the installed ComfyUI"
+        return 0
+    fi
+    if comfy_requirements_ok; then
+        return 0
+    fi
+    warn "$target does not install cleanly — rolling back to the image's version"
+    git -C "$COMFY_DIR" checkout --quiet --force "$before" 2>/dev/null \
+        || warn "rollback checkout failed — run comfypod-doctor"
+    COMFY_REQS_DONE=0
+    comfy_requirements_ok || warn "requirements still fail after the rollback"
+    return 1
+}
+
 setup_comfyui() {
     if [ "$COMFY_CODE_LOCATION" = "container" ]; then
         link_comfy_data
@@ -286,18 +348,18 @@ setup_comfyui() {
         local ref="$COMFYUI_REF"
         [ "$ref" = "latest" ] && ref="$(resolve_latest_tag)"
         [ -n "$ref" ] && git -C "$COMFY_DIR" checkout --quiet "$ref"
-    elif [ "$AUTO_UPDATE" = "true" ]; then
-        "$SCRIPT_DIR/update.sh" --comfyui-only || warn "ComfyUI auto-update failed"
     fi
+    update_comfyui_checkout
     local tag
     tag="$(git -C "$COMFY_DIR" describe --tags --always)"
     log "ComfyUI at $tag"
-    # Krea 2 needs the krea2 architecture tag, added in ComfyUI 0.26.0.
-    if [ "$(printf 'v0.26.0\n%s\n' "$tag" | sort -V | head -n1)" != "v0.26.0" ]; then
-        warn "ComfyUI $tag is older than v0.26.0 — Krea 2 will not load; run comfypod-update"
-    fi
-    run_with_heartbeat "installing ComfyUI requirements" -- \
-        pkg_install -r "$COMFY_DIR/requirements.txt" || warn "ComfyUI requirements install failed"
+    # The two models this stack is built around, and the release each needs.
+    comfy_supports_krea2 \
+        || warn "ComfyUI $tag predates Krea 2 (needs >= v0.26.0) — set AUTO_UPDATE=true"
+    comfy_supports_minimax \
+        || warn "ComfyUI $tag predates MiniMax H3 (needs >= v0.30.0) — set AUTO_UPDATE=true"
+    [ "$COMFY_REQS_DONE" = "1" ] || comfy_requirements_ok \
+        || warn "ComfyUI requirements install failed"
 }
 
 # nodes.txt line format: <git-url>[@commit-or-tag]
@@ -324,6 +386,65 @@ install_node() {
         (cd "$dir" && timeout 600 "$PY" install.py < /dev/null) || warn "install.py failed: $name"
         marker_set "node-setup-$name"
     fi
+}
+
+# One node's git pull. Prints a one-word verdict so the caller can summarise
+# without re-inspecting every repo.
+update_one_node() {
+    local dir="$1" name before after
+    name="$(basename "$dir")"
+    # Detached HEAD means the node is pinned (nodes.txt @ref, or a snapshot
+    # restore). Leave it exactly where the user put it.
+    if ! git -C "$dir" symbolic-ref -q HEAD > /dev/null 2>&1; then
+        printf 'pinned %s\n' "$name"
+        return 0
+    fi
+    before="$(git -C "$dir" rev-parse --short HEAD 2>/dev/null)"
+    if ! timeout 60 git -C "$dir" pull --ff-only --quiet 2> /dev/null; then
+        printf 'skipped %s\n' "$name"
+        return 0
+    fi
+    after="$(git -C "$dir" rev-parse --short HEAD 2>/dev/null)"
+    if [ "$before" = "$after" ]; then
+        printf 'current %s\n' "$name"
+    else
+        printf 'updated %s %s->%s\n' "$name" "$before" "$after"
+    fi
+}
+
+# Pull every git-backed node. This is what stops the pod drifting behind the
+# workflows people publish: a node that is six months old is the usual reason a
+# downloaded workflow reports a missing node type.
+update_custom_nodes() {
+    if [ "$AUTO_UPDATE" != "true" ]; then
+        log "AUTO_UPDATE=false — custom nodes left at their installed commits"
+        return 0
+    fi
+    local dir out n=0
+    out="$TMP_DIR/node-update.$$"
+    mkdir -p "$out"
+    for dir in "$COMFY_DIR"/custom_nodes/*/; do
+        dir="${dir%/}"
+        [ -d "$dir/.git" ] || continue
+        update_one_node "$dir" > "$out/$(basename "$dir")" 2>&1 &
+        n=$((n + 1))
+        # Six at a time: each is a tiny fetch, but one unreachable remote must
+        # not turn into a boot-length stall.
+        while [ "$(jobs -rp | wc -l)" -ge 6 ]; do wait -n 2> /dev/null || true; done
+    done
+    [ "$n" -eq 0 ] && { rm -rf "$out"; return 0; }
+    wait
+    local verdicts nm range
+    verdicts="$(cat "$out"/* 2> /dev/null)"
+    rm -rf "$out"
+    while read -r verdict nm range; do
+        [ "$verdict" = "updated" ] && log "updated node: $nm $range"
+    done <<< "$verdicts"
+    local count
+    count() { printf '%s\n' "$verdicts" | grep -c "^$1 " || true; }
+    log "custom nodes: $(count updated) updated, $(count current) current, \
+$(count pinned) pinned, $(count skipped) skipped"
+    return 0
 }
 
 # Python deps for EVERY node present on the volume — including ones installed
@@ -359,6 +480,16 @@ heal_node_deps() {
             pkg_install -r "$dir/requirements.txt" || warn "requirements failed: $name"
         done
     fi
+    # RES4LYF (and others) ask for `opencv-python`, which ships the same cv2
+    # module as the `opencv-python-headless` this image uses and overwrites it
+    # with a build that expects a display. Both installed at once means cv2 is
+    # whichever landed last, so the GUI build is removed and headless restored.
+    if "$PIP" show opencv-python > /dev/null 2>&1; then
+        warn "a custom node pulled in opencv-python — restoring the headless build"
+        "$PIP" uninstall -y -q opencv-python > /dev/null 2>&1 || true
+        "$PIP" install -q --force-reinstall --no-deps opencv-python-headless \
+            > /dev/null 2>&1 || warn "could not restore opencv-python-headless"
+    fi
     log "re-asserted python deps for $count custom node(s)"
 }
 
@@ -389,6 +520,11 @@ setup_custom_nodes() {
             install_node "$spec" < /dev/null
         done < "$STATE_DIR/extra-nodes.txt"
     fi
+    # Snapshot before pulling anything: a node update that breaks a workflow is
+    # then one `comfypod-snapshot restore pre-boot` away from being undone.
+    "$SCRIPT_DIR/snapshot.sh" save pre-boot > /dev/null 2>&1 \
+        || warn "could not save the pre-update snapshot"
+    run_with_heartbeat "updating custom nodes" -- update_custom_nodes
     persist_nodes
     run_with_heartbeat "checking custom node dependencies" -- heal_node_deps
     # Record the exact commit of every node (the rollback primitive).
@@ -473,6 +609,11 @@ start_services() {
     [ -d "$COMFY_DIR/custom_nodes/ComfyUI-Login" ] && listen=0.0.0.0
     printf '%s' "$listen" > "$STATE_DIR/comfy-listen"
     [ "$listen" = "127.0.0.1" ] && warn "ComfyUI-Login missing — ComfyUI bound to localhost only (SSH tunnel: ssh -L 8188:localhost:8188)"
+
+    # Where this boot's ComfyUI output starts: the log is appended across
+    # restarts, and a stale IMPORT FAILED from three boots ago would otherwise
+    # be reported as a live problem.
+    COMFY_LOG_OFFSET=$(( $(wc -l < "$LOG_DIR/comfyui.log" 2> /dev/null || echo 0) + 1 ))
 
     local sage_flag=""
     if [ "$SAGE_ATTENTION" = "global" ] && "$PY" -c 'import sageattention' 2>/dev/null; then
@@ -571,8 +712,64 @@ print_connection_info() {
         echo ""
         echo " Model downloads: tail -f $LOG_DIR/downloads.log"
         echo " Health check:    comfypod-doctor"
+        echo " Compatibility:   $STATE_DIR/COMPATIBILITY.txt (printed below once nodes load)"
         echo "=================================================================="
     } | tee "$info"
+}
+
+# The check the whole boot exists to produce: after ComfyUI has loaded every
+# node, say plainly what works. ComfyUI knows exactly which nodes failed to
+# import and why — that report is the difference between "my workflow says the
+# node is missing" and knowing which node broke and what to do about it.
+compatibility_report() {
+    local report="$STATE_DIR/COMPATIBILITY.txt"
+    local clog="$LOG_DIR/comfyui.log"
+    local waited=0 up=no
+    while [ "$waited" -lt 120 ]; do
+        if curl -fsS -o /dev/null --max-time 3 "http://127.0.0.1:$COMFYUI_PORT/" 2> /dev/null; then
+            up=yes
+            break
+        fi
+        sleep 3
+        waited=$((waited + 3))
+    done
+
+    local this_boot failed
+    this_boot="$(tail -n "+${COMFY_LOG_OFFSET:-1}" "$clog" 2> /dev/null)"
+    failed="$(printf '%s\n' "$this_boot" | grep -E 'IMPORT FAILED|Cannot import .* module for custom nodes' | sort -u)"
+
+    {
+        echo "=== ComfyPod compatibility check ==="
+        echo "checked:  $(date '+%F %T')"
+        echo "GPU:      $(nvidia-smi --query-gpu=name,driver_version --format=csv,noheader 2> /dev/null | head -1)"
+        echo "torch:    $(torch_report 2> /dev/null)"
+        echo "driver:   $(driver_check 2>&1)"
+        echo "ComfyUI:  $(git -C "$COMFY_DIR" describe --tags --always 2> /dev/null) ($COMFY_CODE_LOCATION)"
+        echo "Krea 2:   $(comfy_supports_krea2 && echo supported || echo "NOT SUPPORTED — needs ComfyUI >= v0.26.0")"
+        echo "MiniMax:  $(comfy_supports_minimax && echo supported || echo "NOT SUPPORTED — needs ComfyUI >= v0.30.0")"
+        echo "nodes:    $(find "$COMFY_DIR/custom_nodes" -mindepth 1 -maxdepth 1 -type d ! -name '__pycache__' 2> /dev/null | wc -l) installed"
+        echo "server:   $([ "$up" = yes ] && echo "answering on :$COMFYUI_PORT" || echo "NOT ANSWERING after ${waited}s")"
+        if [ -n "$failed" ]; then
+            echo ""
+            echo "nodes that failed to import this boot:"
+            printf '%s\n' "$failed" | sed 's/^/  /'
+            echo ""
+            echo "Fix attempts, in order:"
+            echo "  comfypod-node fix                     reinstall every node's requirements"
+            echo "  comfypod-snapshot restore pre-boot    undo this boot's node updates"
+            echo "  comfypod-snapshot restore baseline    go back to the image's node set"
+        else
+            echo "imports:  every custom node imported cleanly"
+        fi
+        echo "==================================="
+    } > "$report" 2>&1
+
+    cat "$report"
+    if [ -n "$failed" ]; then
+        warn "$(printf '%s\n' "$failed" | wc -l) custom node(s) failed to import — see $report"
+    fi
+    [ "$up" = yes ] || warn "ComfyUI is not answering yet — tail -f $clog"
+    return 0
 }
 
 main() {
@@ -596,6 +793,7 @@ main() {
     start_services
     start_downloads
     print_connection_info
+    compatibility_report
     log "boot finished"
 }
 

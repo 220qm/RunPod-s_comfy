@@ -60,18 +60,51 @@ setting in the graph.
   clip to ~8 minutes; movement holds up, but spoken audio starts losing
   detail. Tune steps only after EasyCache, not instead of it.
 
+### Nodes worth wiring in
+
+All installed already — these are the ones that matter for H3 specifically.
+
+| Node | Pack | What it buys you |
+|---|---|---|
+| **EasyCache** | built in | the single biggest win on long clips (see above) |
+| **RIFE VFI** | Frame-Interpolation | render fewer frames and interpolate up to 32/48 fps instead of sampling them |
+| **Video Combine** | VideoHelperSuite | muxes H3's native audio track with the frames |
+| **Patch Sage Attention** | KJNodes | ~30% faster sampling, per workflow |
+| **Sol-Attn** | SolAttn_triton | kijai's triton kernels, tested on 4090/5090 with H3. An alternative to Sage, not a companion — pick one |
+
 ## Krea 2 notes
 
 - Turbo is the distilled checkpoint: ~8 steps, CFG 1. RAW is undistilled —
   ~50 steps at CFG ~3.5, and the right base for LoRA training looks.
 - Pipeline that works well: stills with Krea 2 Turbo → animate the keepers
   with MiniMax H3 image-to-video.
+- **Sampler.** The community settles on the `res_2s` family with the `beta57`
+  scheduler for Krea 2's look — both come from RES4LYF, which is installed.
+  One caveat worth knowing before you chase it: on likeness LoRAs `res_2s` can
+  drift faces, and plain `euler` + `simple` is the fallback that holds identity.
+- **LoRA stacking.** Training one identity at both 512 and 1024 and stacking
+  the two loaders (~0.6 and ~0.4) is the trick that gets medium shots and
+  closeups from one subject.
+
+### Nodes worth wiring in
+
+| Node | Pack | What it buys you |
+|---|---|---|
+| **ClownsharKSampler / res_2s** | RES4LYF | the sampler family Krea 2 workflows are built around |
+| **Ultimate SD Upscale** | UltimateSDUpscale | tiled high-res pass — print size without a second full-resolution sample |
+| **FaceDetailer** | Impact Pack (+ Subpack) | re-renders small faces at full resolution; what fixes wide shots |
+| **Image Comparer** | rgthree | side-by-side A/B when you are tuning steps or samplers |
 
 ## General
 
-- For a speed boost, add the **Patch Sage Attention** node (KJNodes, already
-  installed) with backend `sageattn_qk_int8_pv_fp16_cuda` in front of the
-  model. Do not use the global `--use-sage-attention` flag — it has produced
-  black output on Qwen-family text encoders, which both models here use.
+- For a speed boost, add the **Patch Sage Attention** node (KJNodes) with
+  backend `sageattn_qk_int8_pv_fp16_cuda` in front of the model. Do not use the
+  global `--use-sage-attention` flag — it has produced black output on
+  Qwen-family text encoders, which both models here use.
+- Every boot updates ComfyUI to the newest release and fast-forwards every
+  node, then prints a compatibility report naming anything that failed to
+  import. If a workflow you downloaded reports a missing node type, that report
+  is the first place to look; `comfypod-snapshot restore pre-boot` undoes the
+  boot's node updates.
 - Save your own workflows from the UI — they persist under
   `/workspace/ComfyUI/user/` and survive pod termination.
